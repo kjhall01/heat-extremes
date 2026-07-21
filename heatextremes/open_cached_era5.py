@@ -24,9 +24,10 @@ def open_cached_era5(
     ``surface_pressure``, and ``total_precipitation``. The precipitation value
     at time ``T`` is the total over ``(T - 6 hours, T]`` in metres.
 
-    If ``end_year`` is omitted, every completed cache store from
-    ``start_year`` through the latest available store is opened. Explicitly
-    requesting an end year verifies that every intervening yearly store exists.
+    The most recent published store may be a partial current-year snapshot. If
+    ``end_year`` is omitted, every published store from ``start_year`` through
+    the latest available store is opened. Explicitly requesting an end year
+    verifies that every intervening yearly store exists.
     """
     root = Path(root)
     if end_year is not None and end_year < start_year:

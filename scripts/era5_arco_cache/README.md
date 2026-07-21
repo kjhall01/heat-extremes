@@ -64,13 +64,21 @@ python -u cache_era5_arco_year.py \
 
 ## Submit and validate
 
-The supplied array is `2001-2024%3`; adjust the range after the smoke test.
-Three concurrent jobs is intentionally conservative for remote ARCO access.
+The supplied array is `2001-2026%3`; the 2026 task automatically stops at the
+latest complete six-hour ARCO timestep. Three concurrent jobs is intentionally
+conservative for remote ARCO access. Re-run the current-year task with
+`OVERWRITE_CURRENT_YEAR=1` when you want a newer partial-year snapshot.
 
 ```bash
 cd ~/era5_arco_cache
 sbatch submit_era5_arco_cache.sbatch
-python validate_era5_arco_cache.py --end-year 2024
+python validate_era5_arco_cache.py --end-year 2026 --allow-partial-final-year
+```
+
+Refresh only the current-year snapshot later with:
+
+```bash
+OVERWRITE_CURRENT_YEAR=1 sbatch --array=26 submit_era5_arco_cache.sbatch
 ```
 
 Completed stores are skipped. Recreate a year deliberately with

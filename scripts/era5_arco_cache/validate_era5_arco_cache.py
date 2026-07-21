@@ -25,7 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--start-year", type=int, default=2001)
-    parser.add_argument("--end-year", type=int, default=2024)
+    parser.add_argument("--end-year", type=int, default=2026)
+    parser.add_argument(
+        "--allow-partial-final-year",
+        action="store_true",
+        help="Permit the requested final year to end at a complete 6-hour timestep before Dec 31.",
+    )
     return parser.parse_args()
 
 
@@ -67,9 +72,23 @@ def main() -> None:
                     f"wrong grid {ds.sizes['latitude']}x{ds.sizes['longitude']}"
                 )
 
+            full_end = np.datetime64(f"{year + 1:04d}-01-01T00:00:00") - np.timedelta64(
+                6, "h"
+            )
+            actual_end = ds.time.values[-1]
+            if actual_end != full_end:
+                if not (args.allow_partial_final_year and year == args.end_year):
+                    raise ValueError(
+                        "store is partial; pass --allow-partial-final-year to accept it"
+                    )
+                if actual_end > full_end:
+                    raise ValueError("time coordinate extends beyond the requested year")
+                if bool(ds.attrs.get("cache_complete_year", True)):
+                    raise ValueError("partial store is not marked cache_complete_year=false")
+
             expected_time = np.arange(
                 np.datetime64(f"{year:04d}-01-01T00:00:00"),
-                np.datetime64(f"{year + 1:04d}-01-01T00:00:00"),
+                actual_end + np.timedelta64(6, "h"),
                 np.timedelta64(6, "h"),
             )
             np.testing.assert_array_equal(ds.time.values, expected_time)

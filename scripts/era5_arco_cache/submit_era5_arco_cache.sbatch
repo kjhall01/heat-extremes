@@ -2,7 +2,7 @@
 #SBATCH --job-name=era5_arco_cache
 #SBATCH --partition=general
 #SBATCH --qos=general
-#SBATCH --array=1-24%3
+#SBATCH --array=1-26%3
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
@@ -25,6 +25,20 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 YEAR=$((2000 + SLURM_ARRAY_TASK_ID))
+CACHE_ARGS=(
+    --year "$YEAR"
+    --output-root "$OUTPUT_ROOT"
+    --workers "$SLURM_CPUS_PER_TASK"
+)
+
+# Current-year ARCO data is necessarily incomplete. Let the Python cache job
+# stop at its latest complete 6-hour timestep; older requested years stay full.
+if [[ "$YEAR" -eq "$(date +%Y)" ]]; then
+    CACHE_ARGS+=(--allow-partial-year)
+    if [[ "${OVERWRITE_CURRENT_YEAR:-0}" == "1" ]]; then
+        CACHE_ARGS+=(--overwrite)
+    fi
+fi
 
 CONDA_BASE="/home/kylehall/miniconda3"
 CONDA_ENV="${CONDA_BASE}/envs/${CONDA_ENV_NAME}"
@@ -66,9 +80,7 @@ trap forward_usr1 USR1
 trap forward_term TERM
 
 setsid python -u "$SCRIPT_DIR/cache_era5_arco_year.py" \
-    --year "$YEAR" \
-    --output-root "$OUTPUT_ROOT" \
-    --workers "$SLURM_CPUS_PER_TASK" &
+    "${CACHE_ARGS[@]}" &
 child_pid=$!
 
 return_code=0

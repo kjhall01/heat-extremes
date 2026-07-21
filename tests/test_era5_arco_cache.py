@@ -76,6 +76,17 @@ def test_select_year_requires_all_arco_variables() -> None:
         cache.select_year(source, 2024)
 
 
+def test_select_year_can_stop_at_the_latest_complete_six_hour_timestep() -> None:
+    source = make_arco_source().sel(time=slice(None, "2024-01-02T08:00:00"))
+
+    result = cache.select_year(source, 2024, allow_partial_year=True)
+
+    assert result.sizes["time"] == 6
+    assert result.time.values[-1] == np.datetime64("2024-01-02T06:00:00")
+    assert result.attrs["cache_complete_year"] is False
+    assert result.attrs["cache_time_coverage_end"] == "2024-01-02T06:00:00"
+
+
 def test_select_year_rejects_missing_hourly_precipitation() -> None:
     source = make_arco_source()
     source = source.isel(time=np.arange(source.sizes["time"]) != 10)

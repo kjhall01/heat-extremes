@@ -102,6 +102,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latitude-chunk", type=int, default=45)
     parser.add_argument("--longitude-chunk", type=int, default=90)
     parser.add_argument(
+        "--allow-partial-year",
+        action="store_true",
+        help=(
+            "Cache through the latest complete 6-hour ARCO timestep when the requested "
+            "year is not yet complete."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace an already completed yearly store.",
@@ -139,10 +147,29 @@ def open_source(source: str, cdsapi_key: str) -> xr.Dataset:
     )
 
 
-def expected_times(year: int, cadence_hours: int) -> np.ndarray:
+def year_start(year: int) -> np.datetime64:
+    return np.datetime64(f"{year:04d}-01-01T00:00:00")
+
+
+def full_year_end(year: int, cadence_hours: int) -> np.datetime64:
+    return np.datetime64(f"{year + 1:04d}-01-01T00:00:00") - np.timedelta64(
+        cadence_hours, "h"
+    )
+
+
+def expected_times(
+    year: int,
+    cadence_hours: int,
+    *,
+    end_time: np.datetime64 | None = None,
+) -> np.ndarray:
     start = np.datetime64(f"{year:04d}-01-01T00:00:00")
-    end = np.datetime64(f"{year + 1:04d}-01-01T00:00:00")
-    return np.arange(start, end, np.timedelta64(cadence_hours, "h"))
+    end = full_year_end(year, cadence_hours) if end_time is None else end_time
+    return np.arange(
+        start,
+        end + np.timedelta64(cadence_hours, "h"),
+        np.timedelta64(cadence_hours, "h"),
+    )
 
 
 def assert_regular_time(
@@ -168,30 +195,53 @@ def assert_expected_time(
     year: int,
     cadence_hours: int,
     name: str,
+    end_time: np.datetime64 | None = None,
 ) -> None:
-    expected = expected_times(year, cadence_hours)
+    expected = expected_times(year, cadence_hours, end_time=end_time)
     if not np.array_equal(time_values, expected):
         raise ValueError(
             f"{name} does not contain every {cadence_hours}-hourly timestamp for {year}"
         )
 
 
-def six_hourly_precipitation(source: xr.Dataset, year: int) -> xr.DataArray:
-    """Sum ERA5's hourly precipitation into 6-hour accumulations ending at time."""
-    year_start = np.datetime64(f"{year:04d}-01-01T00:00:00")
-    year_end = np.datetime64(f"{year:04d}-12-31T18:00:00")
-    source_start = year_start - np.timedelta64(5, "h")
+def latest_complete_six_hour_time(source: xr.Dataset, year: int) -> np.datetime64:
+    """Return the latest source timestamp that closes a 6-hour interval in ``year``."""
+    source_time = source.time.sel(
+        time=slice(year_start(year), np.datetime64(f"{year + 1:04d}-01-01T00:00:00"))
+    ).values
+    if source_time.size == 0:
+        raise ValueError(f"No ARCO data found for {year}")
+    assert_regular_time(source_time, cadence_hours=1, name="ARCO source time coordinate")
 
-    hourly = source["tp"].sel(time=slice(source_start, year_end))
+    latest_hour = min(source_time[-1], full_year_end(year, cadence_hours=1))
+    elapsed_hours = int((latest_hour - year_start(year)) / np.timedelta64(1, "h"))
+    latest_complete = year_start(year) + np.timedelta64((elapsed_hours // 6) * 6, "h")
+    if latest_complete < year_start(year):
+        raise ValueError(f"ARCO has not yet published a complete 6-hour interval for {year}")
+    return latest_complete
+
+
+def six_hourly_precipitation(
+    source: xr.Dataset,
+    year: int,
+    *,
+    end_time: np.datetime64,
+) -> xr.DataArray:
+    """Sum ERA5's hourly precipitation into 6-hour accumulations ending at time."""
+    start_time = year_start(year)
+    source_start = start_time - np.timedelta64(5, "h")
+
+    hourly = source["tp"].sel(time=slice(source_start, end_time))
     assert_regular_time(hourly.time.values, cadence_hours=1, name="ARCO total precipitation")
 
     total = hourly.resample(time="6h", label="right", closed="right").sum(skipna=False)
-    total = total.sel(time=slice(year_start, year_end))
+    total = total.sel(time=slice(start_time, end_time))
     assert_expected_time(
         total.time.values,
         year=year,
         cadence_hours=6,
         name="6-hourly ARCO total precipitation",
+        end_time=end_time,
     )
 
     total = total.rename("total_precipitation")
@@ -210,10 +260,18 @@ def six_hourly_precipitation(source: xr.Dataset, year: int) -> xr.DataArray:
     return total
 
 
-def select_year(source: xr.Dataset, year: int, *, source_url: str = SOURCE) -> xr.Dataset:
-    """Create the canonical 6-hourly local-cache dataset for one complete year."""
-    start = f"{year:04d}-01-01T00:00:00"
-    end = f"{year:04d}-12-31T23:00:00"
+def select_year(
+    source: xr.Dataset,
+    year: int,
+    *,
+    source_url: str = SOURCE,
+    allow_partial_year: bool = False,
+) -> xr.Dataset:
+    """Create the canonical 6-hourly local cache for a full or current partial year."""
+    start = year_start(year)
+    end = full_year_end(year, cadence_hours=6)
+    if allow_partial_year:
+        end = latest_complete_six_hour_time(source, year)
     missing = [name for name in SOURCE_TO_CACHE_VARIABLE if name not in source]
     if missing:
         raise KeyError(f"ARCO source is missing expected variables: {missing}")
@@ -226,9 +284,10 @@ def select_year(source: xr.Dataset, year: int, *, source_url: str = SOURCE) -> x
         year=year,
         cadence_hours=1,
         name="ARCO instantaneous fields",
+        end_time=end,
     )
 
-    precipitation = six_hourly_precipitation(source, year)
+    precipitation = six_hourly_precipitation(source, year, end_time=end)
     instantaneous = instantaneous.sel(time=precipitation.time).rename(
         {name: SOURCE_TO_CACHE_VARIABLE[name] for name in INSTANTANEOUS_SOURCE_VARIABLES}
     )
@@ -246,6 +305,7 @@ def select_year(source: xr.Dataset, year: int, *, source_url: str = SOURCE) -> x
         year=year,
         cadence_hours=6,
         name="selected ARCO cache data",
+        end_time=end,
     )
 
     result.attrs = dict(source.attrs)
@@ -255,6 +315,8 @@ def select_year(source: xr.Dataset, year: int, *, source_url: str = SOURCE) -> x
             "cache_source_url": source_url,
             "cache_subset": ", ".join(VARIABLES),
             "cache_year": int(year),
+            "cache_complete_year": bool(end == full_year_end(year, cadence_hours=6)),
+            "cache_time_coverage_end": np.datetime_as_string(end, unit="s"),
             "cache_grid": "0.25 degree, 1440x721; latitude [-90, 90], longitude [-180, 180)",
             "cache_temporal_resolution": "6 hourly",
             "total_precipitation_definition": "6-hour accumulation ending at each timestamp",
@@ -399,9 +461,10 @@ def validate_store(
     np.testing.assert_array_equal(cached.latitude.values, source_year.latitude.values)
     np.testing.assert_array_equal(cached.longitude.values, source_year.longitude.values)
 
+    cache_year = int(source_year.time.dt.year[0])
     np.testing.assert_array_equal(
         cached.time.values,
-        expected_times(int(source_year.time.dt.year[0]), cadence_hours=6),
+        expected_times(cache_year, cadence_hours=6, end_time=source_year.time.values[-1]),
     )
 
     # Compare a small spread of points and both ends of the yearly time range.
@@ -457,7 +520,12 @@ def main() -> None:
         shutil.rmtree(staging_path)
 
     source = open_source(args.source, get_cdsapi_key(args.cdsapirc))
-    year_ds = select_year(source, args.year, source_url=args.source)
+    year_ds = select_year(
+        source,
+        args.year,
+        source_url=args.source,
+        allow_partial_year=args.allow_partial_year,
+    )
 
     log(
         f"Selected year {args.year}: "
@@ -466,6 +534,10 @@ def main() -> None:
         f"{year_ds.sizes['longitude']} lon x "
         f"{len(VARIABLES)} variables; "
         f"{year_ds.nbytes / 1024**3:.2f} GiB logical"
+    )
+    log(
+        f"Coverage through {np.datetime_as_string(year_ds.time.values[-1], unit='h')}; "
+        f"complete_year={year_ds.attrs['cache_complete_year']}"
     )
 
     try:
@@ -487,6 +559,8 @@ def main() -> None:
             f"source={args.source}\n"
             "source_format=ECMWF ERA5 ARCO timeChunked.zarr\n"
             f"variables={','.join(VARIABLES)}\n"
+            f"complete_year={year_ds.attrs['cache_complete_year']}\n"
+            f"time_coverage_end={year_ds.attrs['cache_time_coverage_end']}\n"
             f"completed_utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
         )
         log(f"Finished successfully: {final_path}")
