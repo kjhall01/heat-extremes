@@ -1,0 +1,95 @@
+# Python bytecode and caches
+
+**pycache**/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments and local environment files
+
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+.conda/
+conda-meta/
+
+# Build and packaging artifacts
+
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Jupyter
+
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# IDE and editor files
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and scheduler output
+
+*.log
+logs/
+slurm-*.out
+slurm-*.err
+*.out
+*.err
+
+# Large scientific datasets and generated outputs
+
+data/
+datasets/
+outputs/
+results/
+figures/
+cache/
+caches/
+scratch/
+tmp/
+temp/
+
+*.zarr/
+*.nc
+*.nc4
+*.netcdf
+*.h5
+*.hdf5
+*.grib
+*.grb
+*.grib2
+*.parquet
+*.feather
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+
+# Dask temporary files
+
+dask-worker-space/
+.dask/
+joblib_memmapping_folder_*/
+
+# OS metadata
+
+Thumbs.db
+Desktop.ini

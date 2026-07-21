@@ -1,0 +1,22 @@
+name: heat-extremes
+
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.11
+  - xarray
+  - netcdf4
+  - zarr
+  - cartopy
+  - jupyter
+  - ipykernel
+  - matplotlib
+  - dask
+  - pytorch
+  - gcsfs
+  - pip
+  - pip:
+      - -e ./heatextremes
