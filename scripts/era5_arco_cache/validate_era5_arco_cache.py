@@ -24,7 +24,7 @@ STORE_PREFIX = "era5_arco_6h_surface"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    parser.add_argument("--start-year", type=int, default=2001)
+    parser.add_argument("--start-year", type=int, default=2000)
     parser.add_argument("--end-year", type=int, default=2026)
     parser.add_argument(
         "--allow-partial-final-year",

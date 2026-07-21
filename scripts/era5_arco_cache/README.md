@@ -64,7 +64,7 @@ python -u cache_era5_arco_year.py \
 
 ## Submit and validate
 
-The supplied array is `2001-2026%3`; the 2026 task automatically stops at the
+The supplied array is `2000-2026%3`; the 2026 task automatically stops at the
 latest complete six-hour ARCO timestep. Three concurrent jobs is intentionally
 conservative for remote ARCO access. Re-run the current-year task with
 `OVERWRITE_CURRENT_YEAR=1` when you want a newer partial-year snapshot.
@@ -90,7 +90,7 @@ year's store. Failed staging stores are discarded before a rerun.
 ```python
 from heatextremes import daily_era5_aggregates, open_cached_era5
 
-ds = open_cached_era5(start_year=2001, end_year=2024)
+ds = open_cached_era5(start_year=2000, end_year=2024)
 daily = daily_era5_aggregates(ds)
 ```
 

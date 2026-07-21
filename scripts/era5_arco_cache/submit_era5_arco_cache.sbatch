@@ -2,7 +2,7 @@
 #SBATCH --job-name=era5_arco_cache
 #SBATCH --partition=general
 #SBATCH --qos=general
-#SBATCH --array=1-26%3
+#SBATCH --array=0-26%3
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00

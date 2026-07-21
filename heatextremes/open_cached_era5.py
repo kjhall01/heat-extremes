@@ -14,7 +14,7 @@ STORE_PREFIX = "era5_arco_6h_surface"
 
 def open_cached_era5(
     root: str | Path = DEFAULT_ROOT,
-    start_year: int = 2001,
+    start_year: int = 2000,
     end_year: int | None = None,
 ) -> xr.Dataset:
     """Open completed ECMWF ERA5 ARCO cache stores lazily along time.
