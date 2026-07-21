@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=wb2_era5_cache
+#SBATCH --job-name=era5_arco_cache
 #SBATCH --partition=general
 #SBATCH --qos=general
-#SBATCH --array=23-24%3
+#SBATCH --array=1-24%3
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
@@ -13,10 +13,10 @@
 
 set -euo pipefail
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-/net/monsoon/kylehall/ERA5/wb2_era5_6h_surface}"
-CONDA_ENV="${WB2_CACHE_ENV:-wb2-cache}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/net/monsoon/kylehall/ERA5/era5_arco_6h_surface}"
+CONDA_ENV_NAME="${ERA5_ARCO_CACHE_ENV:-era5-arco-cache}"
 
-SCRIPT_DIR="${SLURM_SUBMIT_DIR:?Submit the job from the wb2_era5_cache directory.}"
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:?Submit the job from the era5_arco_cache directory.}"
 
 # Avoid accidental nested threading inside numerical libraries.
 export OMP_NUM_THREADS=1
@@ -27,7 +27,7 @@ export NUMEXPR_NUM_THREADS=1
 YEAR=$((2000 + SLURM_ARRAY_TASK_ID))
 
 CONDA_BASE="/home/kylehall/miniconda3"
-CONDA_ENV="${CONDA_BASE}/envs/wb2-cache"
+CONDA_ENV="${CONDA_BASE}/envs/${CONDA_ENV_NAME}"
 
 if [[ ! -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]]; then
     echo "Missing Conda initialization: ${CONDA_BASE}" >&2
@@ -65,7 +65,7 @@ forward_term() {
 trap forward_usr1 USR1
 trap forward_term TERM
 
-setsid python -u "$SCRIPT_DIR/cache_wb2_era5_year.py" \
+setsid python -u "$SCRIPT_DIR/cache_era5_arco_year.py" \
     --year "$YEAR" \
     --output-root "$OUTPUT_ROOT" \
     --workers "$SLURM_CPUS_PER_TASK" &

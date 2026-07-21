@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the collection of yearly WeatherBench2 ERA5 cache stores."""
+"""Validate the collection of yearly ECMWF ERA5 ARCO cache stores."""
 
 from __future__ import annotations
 
@@ -14,16 +14,18 @@ VARIABLES = (
     "2m_temperature",
     "2m_dewpoint_temperature",
     "surface_pressure",
+    "total_precipitation",
 )
 
-DEFAULT_ROOT = Path("/net/monsoon/kylehall/ERA5/wb2_era5_6h_surface")
+DEFAULT_ROOT = Path("/net/monsoon/kylehall/ERA5/era5_arco_6h_surface")
+STORE_PREFIX = "era5_arco_6h_surface"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--start-year", type=int, default=2001)
-    parser.add_argument("--end-year", type=int, default=2023)
+    parser.add_argument("--end-year", type=int, default=2024)
     return parser.parse_args()
 
 
@@ -46,7 +48,7 @@ def main() -> None:
     )
 
     for year in range(args.start_year, args.end_year + 1):
-        path = args.root / f"wb2_era5_6h_surface_{year:04d}.zarr"
+        path = args.root / f"{STORE_PREFIX}_{year:04d}.zarr"
         success = path / "_SUCCESS"
 
         if not path.exists() or not success.exists():
@@ -65,13 +67,15 @@ def main() -> None:
                     f"wrong grid {ds.sizes['latitude']}x{ds.sizes['longitude']}"
                 )
 
-            if ds.sizes["time"] > 1:
-                hours = np.diff(ds.time.values) / np.timedelta64(1, "h")
-                if not np.all(hours == 6):
-                    raise ValueError("time coordinate is not uniformly 6-hourly")
+            expected_time = np.arange(
+                np.datetime64(f"{year:04d}-01-01T00:00:00"),
+                np.datetime64(f"{year + 1:04d}-01-01T00:00:00"),
+                np.timedelta64(6, "h"),
+            )
+            np.testing.assert_array_equal(ds.time.values, expected_time)
 
-            if int(ds.time.dt.year.min()) != year or int(ds.time.dt.year.max()) != year:
-                raise ValueError("time coordinate contains the wrong year")
+            if ds["total_precipitation"].attrs.get("units") != "m":
+                raise ValueError("total_precipitation is not stored in metres")
 
             size_bytes = directory_size(path)
             total_bytes += size_bytes

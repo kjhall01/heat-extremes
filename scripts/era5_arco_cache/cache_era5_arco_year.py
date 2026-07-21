@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""
-Cache one year of selected WeatherBench2 ERA5 surface variables to local Zarr.
+"""Cache selected ECMWF ERA5 ARCO surface fields to a local 6-hourly Zarr store.
 
-The source is the public WeatherBench2 0.25-degree, 6-hourly ERA5 store.
-Each year is written to a temporary directory, validated, and atomically renamed
-to its final path. Re-running a completed year is therefore safe.
+The source is ECMWF's authenticated, time-chunked ERA5 ARCO Zarr archive. Each
+year is written to a temporary directory, validated, and atomically renamed to
+its final path. Re-running a completed year is therefore safe.
+
+Instantaneous fields are sampled at 00, 06, 12, and 18 UTC. Total
+precipitation is an hourly accumulation in ERA5 ARCO, so it is summed into
+6-hour accumulations ending at those timestamps. It is *not* subsampled.
 
 Designed for a Slurm array with one year per task.
 """
@@ -20,7 +23,6 @@ import time
 from pathlib import Path
 
 import dask
-import gcsfs
 import numpy as np
 import xarray as xr
 import zarr
@@ -29,17 +31,27 @@ from numcodecs import Blosc
 
 
 SOURCE = (
-    "gs://weatherbench2/datasets/era5/"
-    "1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+    "https://arco.datastores.ecmwf.int/cadl-arco-time-002/arco/"
+    "reanalysis_era5_single_levels/sfc/timeChunked.zarr"
 )
 
+SOURCE_TO_CACHE_VARIABLE = {
+    "t2m": "2m_temperature",
+    "d2m": "2m_dewpoint_temperature",
+    "sp": "surface_pressure",
+    "tp": "total_precipitation",
+}
+
+INSTANTANEOUS_SOURCE_VARIABLES = ("t2m", "d2m", "sp")
 VARIABLES = (
     "2m_temperature",
     "2m_dewpoint_temperature",
     "surface_pressure",
+    "total_precipitation",
 )
 
-DEFAULT_OUTPUT_ROOT = Path("/net/monsoon/kylehall/ERA5/wb2_era5_6h_surface")
+DEFAULT_OUTPUT_ROOT = Path("/net/monsoon/kylehall/ERA5/era5_arco_6h_surface")
+STORE_PREFIX = "era5_arco_6h_surface"
 
 
 def log(message: str) -> None:
@@ -71,10 +83,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--source", default=SOURCE)
     parser.add_argument(
+        "--cdsapirc",
+        type=Path,
+        help="Optional path to a CDS API configuration file containing 'key: <token>'.",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=int(os.environ.get("SLURM_CPUS_PER_TASK", "8")),
-        help="Number of threaded Dask workers used for GCS reads and local writes.",
+        help="Number of threaded Dask workers used for ARCO reads and local writes.",
     )
     parser.add_argument(
         "--time-chunk",
@@ -92,33 +109,131 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def open_source(source: str) -> xr.Dataset:
-    log(f"Opening public GCS source: {source}")
-    fs = gcsfs.GCSFileSystem(token="anon")
-    mapper = fs.get_mapper(source)
+def get_cdsapi_key(cdsapirc: Path | None = None) -> str:
+    """Return the CDS API token from CDSAPI_KEY or a CDS API configuration file."""
+    token = os.environ.get("CDSAPI_KEY")
+    if token:
+        return token
+
+    config_path = cdsapirc or Path.home() / ".cdsapirc"
+    if config_path.is_file():
+        for line in config_path.read_text().splitlines():
+            key, separator, value = line.partition(":")
+            if separator and key.strip() == "key" and value.strip():
+                return value.strip()
+
+    raise RuntimeError(
+        "No CDS API key found. Set CDSAPI_KEY or create ~/.cdsapirc with "
+        "'key: <your CDS API token>'. Accept the ERA5 licence in the CDS first."
+    )
+
+
+def open_source(source: str, cdsapi_key: str) -> xr.Dataset:
+    """Open the ECMWF time-chunked ARCO store without loading data values."""
+    log(f"Opening ECMWF ERA5 ARCO source: {source}")
     return xr.open_zarr(
-        mapper,
+        source,
         consolidated=True,
-        chunks={},  # Preserve native WB2 chunks: one full global field per time.
+        chunks={},
+        storage_options={"headers": {"Authorization": f"Bearer {cdsapi_key}"}},
     )
 
 
-def select_year(source: xr.Dataset, year: int) -> xr.Dataset:
+def expected_times(year: int, cadence_hours: int) -> np.ndarray:
+    start = np.datetime64(f"{year:04d}-01-01T00:00:00")
+    end = np.datetime64(f"{year + 1:04d}-01-01T00:00:00")
+    return np.arange(start, end, np.timedelta64(cadence_hours, "h"))
+
+
+def assert_regular_time(
+    time_values: np.ndarray,
+    *,
+    cadence_hours: int,
+    name: str,
+) -> None:
+    if time_values.size == 0:
+        raise ValueError(f"{name} has no time steps")
+    if time_values.size > 1:
+        hours = np.diff(time_values) / np.timedelta64(1, "h")
+        if not np.all(hours == cadence_hours):
+            bad = np.where(hours != cadence_hours)[0][:10]
+            raise ValueError(
+                f"{name} is not uniformly {cadence_hours}-hourly at indices {bad.tolist()}"
+            )
+
+
+def assert_expected_time(
+    time_values: np.ndarray,
+    *,
+    year: int,
+    cadence_hours: int,
+    name: str,
+) -> None:
+    expected = expected_times(year, cadence_hours)
+    if not np.array_equal(time_values, expected):
+        raise ValueError(
+            f"{name} does not contain every {cadence_hours}-hourly timestamp for {year}"
+        )
+
+
+def six_hourly_precipitation(source: xr.Dataset, year: int) -> xr.DataArray:
+    """Sum ERA5's hourly precipitation into 6-hour accumulations ending at time."""
+    year_start = np.datetime64(f"{year:04d}-01-01T00:00:00")
+    year_end = np.datetime64(f"{year:04d}-12-31T18:00:00")
+    source_start = year_start - np.timedelta64(5, "h")
+
+    hourly = source["tp"].sel(time=slice(source_start, year_end))
+    assert_regular_time(hourly.time.values, cadence_hours=1, name="ARCO total precipitation")
+
+    total = hourly.resample(time="6h", label="right", closed="right").sum(skipna=False)
+    total = total.sel(time=slice(year_start, year_end))
+    assert_expected_time(
+        total.time.values,
+        year=year,
+        cadence_hours=6,
+        name="6-hourly ARCO total precipitation",
+    )
+
+    total = total.rename("total_precipitation")
+    total.attrs = dict(source["tp"].attrs)
+    total.attrs.update(
+        {
+            "long_name": "Total precipitation over the preceding 6 hours",
+            "units": "m",
+            "cell_methods": "time: sum",
+            "comment": (
+                "Each value at time T is the sum of hourly ERA5 total precipitation "
+                "accumulations over (T - 6 hours, T]."
+            ),
+        }
+    )
+    return total
+
+
+def select_year(source: xr.Dataset, year: int, *, source_url: str = SOURCE) -> xr.Dataset:
+    """Create the canonical 6-hourly local-cache dataset for one complete year."""
     start = f"{year:04d}-01-01T00:00:00"
-    end = f"{year:04d}-12-31T23:59:59"
-
-    missing = [name for name in VARIABLES if name not in source]
+    end = f"{year:04d}-12-31T23:00:00"
+    missing = [name for name in SOURCE_TO_CACHE_VARIABLE if name not in source]
     if missing:
-        raise KeyError(f"Source is missing expected variables: {missing}")
+        raise KeyError(f"ARCO source is missing expected variables: {missing}")
 
-    result = (
-        source[list(VARIABLES)]
-        .sel(time=slice(start, end))
-        .transpose("time", "latitude", "longitude")
+    instantaneous = source[list(INSTANTANEOUS_SOURCE_VARIABLES)].sel(
+        time=slice(start, end)
+    )
+    assert_expected_time(
+        instantaneous.time.values,
+        year=year,
+        cadence_hours=1,
+        name="ARCO instantaneous fields",
     )
 
-    if result.sizes["time"] == 0:
-        raise ValueError(f"No source data found for year {year}")
+    precipitation = six_hourly_precipitation(source, year)
+    instantaneous = instantaneous.sel(time=precipitation.time).rename(
+        {name: SOURCE_TO_CACHE_VARIABLE[name] for name in INSTANTANEOUS_SOURCE_VARIABLES}
+    )
+    result = xr.merge([instantaneous, precipitation], compat="override", join="exact")
+    result = result[list(VARIABLES)].transpose("time", "latitude", "longitude")
 
     if result.sizes["latitude"] != 721 or result.sizes["longitude"] != 1440:
         raise ValueError(
@@ -126,21 +241,23 @@ def select_year(source: xr.Dataset, year: int) -> xr.Dataset:
             f"{result.sizes['latitude']} x {result.sizes['longitude']}"
         )
 
-    time_values = result.time.values
-    if time_values.size > 1:
-        hours = np.diff(time_values) / np.timedelta64(1, "h")
-        if not np.all(hours == 6):
-            bad = np.where(hours != 6)[0][:10]
-            raise ValueError(f"Non-6-hourly source cadence at indices {bad.tolist()}")
+    assert_expected_time(
+        result.time.values,
+        year=year,
+        cadence_hours=6,
+        name="selected ARCO cache data",
+    )
 
     result.attrs = dict(source.attrs)
     result.attrs.update(
         {
-            "cache_source": SOURCE,
+            "cache_source": "ECMWF ERA5 ARCO time-chunked surface Zarr",
+            "cache_source_url": source_url,
             "cache_subset": ", ".join(VARIABLES),
             "cache_year": int(year),
-            "cache_grid": "0.25 degree, 1440x721 with poles",
+            "cache_grid": "0.25 degree, 1440x721; latitude [-90, 90], longitude [-180, 180)",
             "cache_temporal_resolution": "6 hourly",
+            "total_precipitation_definition": "6-hour accumulation ending at each timestamp",
         }
     )
     return result
@@ -167,10 +284,10 @@ def make_encoding(
 
 
 def output_paths(output_root: Path, year: int) -> tuple[Path, Path]:
-    final_path = output_root / f"wb2_era5_6h_surface_{year:04d}.zarr"
+    final_path = output_root / f"{STORE_PREFIX}_{year:04d}.zarr"
     job_token = os.environ.get("SLURM_JOB_ID", str(os.getpid()))
     staging_path = output_root / (
-        f".wb2_era5_6h_surface_{year:04d}.zarr.partial-{job_token}"
+        f".{STORE_PREFIX}_{year:04d}.zarr.partial-{job_token}"
     )
     return final_path, staging_path
 
@@ -282,10 +399,10 @@ def validate_store(
     np.testing.assert_array_equal(cached.latitude.values, source_year.latitude.values)
     np.testing.assert_array_equal(cached.longitude.values, source_year.longitude.values)
 
-    if cached.sizes["time"] > 1:
-        hours = np.diff(cached.time.values) / np.timedelta64(1, "h")
-        if not np.all(hours == 6):
-            raise ValueError("Cached time coordinate is not uniformly 6-hourly")
+    np.testing.assert_array_equal(
+        cached.time.values,
+        expected_times(int(source_year.time.dt.year[0]), cadence_hours=6),
+    )
 
     # Compare a small spread of points and both ends of the yearly time range.
     time_indices = sorted(set([0, cached.sizes["time"] // 2, cached.sizes["time"] - 1]))
@@ -311,8 +428,11 @@ def main() -> None:
     args = parse_args()
     signal.signal(signal.SIGUSR1, handle_usr1)
 
-    if not (1959 <= args.year <= 2023):
-        raise ValueError("The selected WeatherBench2 store covers 1959 through 2023-01-10")
+    if args.year < 1941:
+        raise ValueError(
+            "This 6-hour precipitation cache requires data from the preceding day; "
+            "choose a year from 1941 onward."
+        )
 
     if args.workers < 1:
         raise ValueError("--workers must be positive")
@@ -321,23 +441,23 @@ def main() -> None:
     final_path, staging_path = output_paths(args.output_root, args.year)
     success_marker = final_path / "_SUCCESS"
 
-    if final_path.exists() and success_marker.exists() and not args.overwrite:
-        log(f"Completed store already exists; skipping: {final_path}")
-        return
+    if final_path.exists():
+        if success_marker.exists() and not args.overwrite:
+            log(f"Completed store already exists; skipping: {final_path}")
+            return
+        if not args.overwrite:
+            raise FileExistsError(
+                f"Refusing to replace existing store without --overwrite: {final_path}"
+            )
+        log(f"Removing existing store because --overwrite was supplied: {final_path}")
+        shutil.rmtree(final_path)
 
-   # if final_path.exists():
-   #     if args.overwrite:
-   #         log(f"Removing existing final store because --overwrite was supplied: {final_path}")
-   #     else:
-   #         log(f"Removing incomplete final store without _SUCCESS marker: {final_path}")
-   #     shutil.rmtree(final_path)
+    if staging_path.exists():
+        log(f"Removing stale staging store: {staging_path}")
+        shutil.rmtree(staging_path)
 
-   # if staging_path.exists():
-   #     log(f"Removing stale staging store from an earlier attempt: {staging_path}")
-   #     shutil.rmtree(staging_path)
-
-    source = open_source(args.source)
-    year_ds = select_year(source, args.year)
+    source = open_source(args.source, get_cdsapi_key(args.cdsapirc))
+    year_ds = select_year(source, args.year, source_url=args.source)
 
     log(
         f"Selected year {args.year}: "
@@ -365,6 +485,7 @@ def main() -> None:
         success_marker.write_text(
             f"year={args.year}\n"
             f"source={args.source}\n"
+            "source_format=ECMWF ERA5 ARCO timeChunked.zarr\n"
             f"variables={','.join(VARIABLES)}\n"
             f"completed_utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
         )
