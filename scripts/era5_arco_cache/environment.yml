@@ -11,4 +11,4 @@ dependencies:
   - numpy>=1.26
   - pip
   - pip:
-      - httpio>=0.6
+      - httpio>=0.3
