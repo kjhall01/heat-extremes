@@ -53,7 +53,7 @@ def daily_aifs_aggregates(
     step_dim: str = "prediction_timedelta",
     output_step_dim: str = "prediction_timedelta",
 ) -> xr.Dataset:
-    """Return daily mean and maximum temperature from 6-hourly forecasts."""
+    """Return daily minimum, mean, and maximum temperature from 6-hourly forecasts."""
     if variable not in ds:
         raise KeyError(f"Dataset is missing {variable}")
     if step_dim not in ds.dims:
@@ -72,6 +72,7 @@ def daily_aifs_aggregates(
 
     daily = xr.Dataset(
         {
+            "t2m_min_6h": temperature.resample(**{step_dim: "1D"}).min(),
             "t2m_mean_6h": temperature.resample(**{step_dim: "1D"}).mean(),
             "t2m_max_6h": temperature.resample(**{step_dim: "1D"}).max(),
         }

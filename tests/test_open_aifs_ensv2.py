@@ -25,6 +25,7 @@ def test_daily_aifs_aggregates_returns_daily_forecast_temperature() -> None:
 
     daily = daily_aifs_aggregates(ds)
 
+    np.testing.assert_allclose(daily["t2m_min_6h"].values, [[[0.0], [4.0]]])
     np.testing.assert_allclose(daily["t2m_mean_6h"].values, [[[1.5], [5.5]]])
     np.testing.assert_allclose(daily["t2m_max_6h"].values, [[[3.0], [7.0]]])
     np.testing.assert_array_equal(
@@ -52,4 +53,5 @@ def test_daily_aifs_aggregates_limits_the_number_of_complete_days() -> None:
     daily = daily_aifs_aggregates(ds, max_days=1)
 
     assert daily.sizes["prediction_timedelta"] == 1
+    np.testing.assert_allclose(daily["t2m_min_6h"].values, [[0.0]])
     np.testing.assert_allclose(daily["t2m_mean_6h"].values, [[1.5]])

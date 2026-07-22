@@ -93,6 +93,7 @@ def daily_era5_aggregates(ds: xr.Dataset) -> xr.Dataset:
     )
     return xr.Dataset(
         {
+            "t2m_min_6h": ds["2m_temperature"].resample(time="1D").min(),
             "t2m_mean_6h": ds["2m_temperature"].resample(time="1D").mean(),
             "t2m_max_6h": ds["2m_temperature"].resample(time="1D").max(),
             "total_precipitation": precipitation.resample(time="1D").sum(min_count=4),

@@ -22,5 +22,6 @@ def test_daily_era5_aggregates_aligns_end_labelled_precipitation() -> None:
 
     daily = daily_era5_aggregates(ds)
 
+    assert daily["t2m_min_6h"].sel(time="2024-01-01").item() == 0
     assert daily["total_precipitation"].sel(time="2024-01-01").item() == 4
     assert np.isnan(daily["total_precipitation"].sel(time="2024-01-02").item())
