@@ -10,7 +10,7 @@ def open_aifs_ensv2():
     paths = sorted(root.glob("*.zarr"))
     for path in paths:
         assert path.is_dir(), f'{path} does not exist?'
-    wanted = ["2d", "2t"]
+    wanted = ["2d", "2t", 'tp']
 
     with ProgressBar():
         ds = xr.open_mfdataset(
@@ -39,32 +39,45 @@ def open_aifs_ensv2():
         {
             "2d": "2m_dewpoint_temperature",
             "2t": "2m_temperature",
+            'tp': 'total_precipitation',
             "lat": "latitude",
             "lon": "longitude",
         }
     )
 
 
-def daily_aifs_aggregates(ds: xr.Dataset, max_days: int | None = None) -> xr.Dataset:
-    """Return daily mean and maximum 2m temperature from 6-hourly forecasts.
+def daily_aifs_aggregates(
+    ds: xr.Dataset,
+    max_days: int | None = None,
+    variable: str = "2m_temperature",
+    step_dim: str = "prediction_timedelta",
+    output_step_dim: str = "prediction_timedelta",
+) -> xr.Dataset:
+    """Return daily mean and maximum temperature from 6-hourly forecasts."""
+    if variable not in ds:
+        raise KeyError(f"Dataset is missing {variable}")
+    if step_dim not in ds.dims:
+        raise ValueError(f"Dataset must have a {step_dim} dimension")
+    if step_dim not in ds.coords:
+        raise ValueError(f"Dataset must have a {step_dim} coordinate")
 
-    Forecast steps are assumed to be at 00, 06, 12, and 18 UTC, starting at
-    zero. The output uses ``prediction_timedelta`` so it can be passed directly
-    to the verification metrics.
-    """
-    if "2m_temperature" not in ds:
-        raise KeyError("Dataset is missing 2m_temperature")
-    if "step" not in ds.dims:
-        raise ValueError("Dataset must have a step dimension")
+    temperature = ds[variable]
     if max_days is not None:
         if max_days < 1:
             raise ValueError("max_days must be at least 1")
-        ds = ds.where(ds.step < np.timedelta64(max_days, "D"), drop=True)
+        temperature = temperature.where(
+            temperature[step_dim] < np.timedelta64(max_days, "D"),
+            drop=True,
+        )
 
-    temperature = ds["2m_temperature"]
-    return xr.Dataset(
+    daily = xr.Dataset(
         {
-            "t2m_mean_6h": temperature.resample(step="1D").mean(),
-            "t2m_max_6h": temperature.resample(step="1D").max(),
+            "t2m_mean_6h": temperature.resample(**{step_dim: "1D"}).mean(),
+            "t2m_max_6h": temperature.resample(**{step_dim: "1D"}).max(),
         }
-    ).rename({"step": "prediction_timedelta"})
+    )
+
+    if step_dim != output_step_dim:
+        daily = daily.rename({step_dim: output_step_dim})
+
+    return daily
