@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
@@ -42,3 +43,28 @@ def open_aifs_ensv2():
             "lon": "longitude",
         }
     )
+
+
+def daily_aifs_aggregates(ds: xr.Dataset, max_days: int | None = None) -> xr.Dataset:
+    """Return daily mean and maximum 2m temperature from 6-hourly forecasts.
+
+    Forecast steps are assumed to be at 00, 06, 12, and 18 UTC, starting at
+    zero. The output uses ``prediction_timedelta`` so it can be passed directly
+    to the verification metrics.
+    """
+    if "2m_temperature" not in ds:
+        raise KeyError("Dataset is missing 2m_temperature")
+    if "step" not in ds.dims:
+        raise ValueError("Dataset must have a step dimension")
+    if max_days is not None:
+        if max_days < 1:
+            raise ValueError("max_days must be at least 1")
+        ds = ds.where(ds.step < np.timedelta64(max_days, "D"), drop=True)
+
+    temperature = ds["2m_temperature"]
+    return xr.Dataset(
+        {
+            "t2m_mean_6h": temperature.resample(step="1D").mean(),
+            "t2m_max_6h": temperature.resample(step="1D").max(),
+        }
+    ).rename({"step": "prediction_timedelta"})
