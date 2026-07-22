@@ -50,7 +50,7 @@ def daily_aifs_aggregates(
     ds: xr.Dataset,
     max_days: int | None = None,
     variable: str = "2m_temperature",
-    step_dim: str = "prediction_timedelta",
+    step_dim: str = "step",
     output_step_dim: str = "prediction_timedelta",
 ) -> xr.Dataset:
     """Return daily mean and maximum temperature from 6-hourly forecasts."""
