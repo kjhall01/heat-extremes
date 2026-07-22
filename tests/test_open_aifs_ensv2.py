@@ -10,13 +10,15 @@ def test_daily_aifs_aggregates_returns_daily_forecast_temperature() -> None:
     ds = xr.Dataset(
         {
             "2m_temperature": (
-                ("time", "step", "number"),
+                ("time", "prediction_timedelta", "number"),
                 np.arange(8, dtype="float32")[None, :, None],
             )
         },
         coords={
             "time": np.array(["2024-01-01"], dtype="datetime64[ns]"),
-            "step": (np.arange(8).astype("timedelta64[h]") * 6).astype("timedelta64[ns]"),
+            "prediction_timedelta": (
+                (np.arange(8).astype("timedelta64[h]") * 6).astype("timedelta64[ns]")
+            ),
             "number": [0],
         },
     )
@@ -35,13 +37,15 @@ def test_daily_aifs_aggregates_limits_the_number_of_complete_days() -> None:
     ds = xr.Dataset(
         {
             "2m_temperature": (
-                ("time", "step"),
+                ("time", "prediction_timedelta"),
                 np.arange(8, dtype="float32")[None, :],
             )
         },
         coords={
             "time": np.array(["2024-01-01"], dtype="datetime64[ns]"),
-            "step": (np.arange(8).astype("timedelta64[h]") * 6).astype("timedelta64[ns]"),
+            "prediction_timedelta": (
+                (np.arange(8).astype("timedelta64[h]") * 6).astype("timedelta64[ns]")
+            ),
         },
     )
 

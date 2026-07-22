@@ -22,7 +22,7 @@ def open_aifs_ensv2():
             chunks={
                 "time": 1,  # unavoidable: one time per store
                 "number": 26,  # combine all ensemble members
-                "step": 24,
+                "prediction_timedelta": 24,
                 "latitude": 180,
                 "longitude": 180,
             },
@@ -50,7 +50,7 @@ def daily_aifs_aggregates(
     ds: xr.Dataset,
     max_days: int | None = None,
     variable: str = "2m_temperature",
-    step_dim: str = "step",
+    step_dim: str = "prediction_timedelta",
     output_step_dim: str = "prediction_timedelta",
 ) -> xr.Dataset:
     """Return daily mean and maximum temperature from 6-hourly forecasts."""
