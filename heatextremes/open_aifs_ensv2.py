@@ -7,6 +7,8 @@ from dask.diagnostics import ProgressBar
 def open_aifs_ensv2():
     root = Path("/net/monsoon/marchakitus/AIFS/v2p0/combined/forecasts_AIFS_ENS_v2")
     paths = sorted(root.glob("*.zarr"))
+    for path in paths:
+        assert path.is_dir(), f'{path} does not exist?'
     wanted = ["2d", "2t"]
 
     with ProgressBar():

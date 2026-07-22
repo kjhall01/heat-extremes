@@ -16,6 +16,7 @@ def open_cached_era5(
     root: str | Path = DEFAULT_ROOT,
     start_year: int = 2000,
     end_year: int | None = None,
+    chunks: dict | None = None
 ) -> xr.Dataset:
     """Open completed ECMWF ERA5 ARCO cache stores lazily along time.
 
@@ -29,6 +30,8 @@ def open_cached_era5(
     the latest available store is opened. Explicitly requesting an end year
     verifies that every intervening yearly store exists.
     """
+    dask_chunks = {} if chunks is None else chunks
+
     root = Path(root)
     if end_year is not None and end_year < start_year:
         raise ValueError("end_year must be greater than or equal to start_year")
@@ -58,7 +61,7 @@ def open_cached_era5(
         raise FileNotFoundError(f"Missing incomplete/yearly stores:\n{formatted}")
 
     datasets = [
-        xr.open_zarr(path, consolidated=True, chunks={})
+        xr.open_zarr(path, consolidated=True, chunks=dask_chunks)
         for path in paths
     ]
 
