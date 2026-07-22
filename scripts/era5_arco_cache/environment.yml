@@ -7,7 +7,7 @@ dependencies:
   - dask>=2024.10
   - fsspec>=2024.10
   - zarr>=2.18,<3
-  - numcodecs>=0.12
+  - numcodecs>=0.12,<0.16  
   - numpy>=1.26
   - pip
   - pip:
