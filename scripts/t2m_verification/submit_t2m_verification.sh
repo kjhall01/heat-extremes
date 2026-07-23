@@ -8,10 +8,11 @@ PIPELINE_ROOT="${PIPELINE_ROOT:-/net/monsoon/kylehall/heat_extremes/t2m_verifica
 
 mkdir -p "${PIPELINE_ROOT}/logs"
 
-forecast_job="$(sbatch --parsable "${SCRIPT_DIR}/01_build_t2m_forecast_aggregates.sbatch")"
-era5_job="$(sbatch --parsable --dependency="afterok:${forecast_job}" "${SCRIPT_DIR}/02_build_t2m_era5_aggregates.sbatch")"
-metrics_job="$(sbatch --parsable --dependency="afterok:${era5_job}" "${SCRIPT_DIR}/03_calculate_t2m_metrics.sbatch")"
-summary_job="$(sbatch --parsable --dependency="afterok:${metrics_job}" "${SCRIPT_DIR}/04_aggregate_and_plot_t2m_metrics.sbatch")"
+export_args="--export=ALL,PIPELINE_SCRIPT_DIR=${SCRIPT_DIR}"
+forecast_job="$(sbatch --parsable "${export_args}" "${SCRIPT_DIR}/01_build_t2m_forecast_aggregates.sbatch")"
+era5_job="$(sbatch --parsable "${export_args}" --dependency="afterok:${forecast_job}" "${SCRIPT_DIR}/02_build_t2m_era5_aggregates.sbatch")"
+metrics_job="$(sbatch --parsable "${export_args}" --dependency="afterok:${era5_job}" "${SCRIPT_DIR}/03_calculate_t2m_metrics.sbatch")"
+summary_job="$(sbatch --parsable "${export_args}" --dependency="afterok:${metrics_job}" "${SCRIPT_DIR}/04_aggregate_and_plot_t2m_metrics.sbatch")"
 
 printf 'Submitted forecast aggregates: %s\n' "${forecast_job}"
 printf 'Submitted matched ERA5 aggregates: %s\n' "${era5_job}"
