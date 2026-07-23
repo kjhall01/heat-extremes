@@ -68,6 +68,10 @@ def main() -> None:
             "forecast_year_end": args.end_year,
         }
     )
+    # Source Zarr encodings describe the full AIFS store.  They are not valid
+    # for this selected/rechunked intermediate and can make safe parallel
+    # writes overlap a target chunk.
+    daily = daily.drop_encoding()
 
     print(f"Writing {args.output}")
     with dask.config.set(scheduler="threads", num_workers=args.workers):

@@ -65,6 +65,9 @@ def main() -> None:
             "forecast_year_end": args.end_year,
         }
     )
+    # The selected day coordinate retains the source store's 50-day encoding;
+    # discard inherited encodings so this output is safely rechunked by xarray.
+    daily = daily.drop_encoding()
 
     print(f"Writing {args.output}")
     with dask.config.set(scheduler="threads", num_workers=args.workers):

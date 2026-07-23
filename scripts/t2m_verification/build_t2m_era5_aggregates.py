@@ -63,6 +63,7 @@ def main() -> None:
             "model_store": str(args.model_store),
         }
     )
+    daily = daily.drop_encoding()
 
     print(f"Writing {args.output}")
     with dask.config.set(scheduler="threads", num_workers=args.workers):
