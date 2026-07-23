@@ -21,7 +21,11 @@ CONDA_ENV_NAME="${HEAT_EXTREMES_ENV:-heat-extremes}"
 
 mkdir -p "${PIPELINE_ROOT}/logs"
 source "${CONDA_BASE}/etc/profile.d/conda.sh"
+# Conda's MKL activation hook dereferences unset variables, which conflicts
+# with the job script's nounset setting. Restore nounset immediately after.
+set +u
 conda activate "${CONDA_BASE}/envs/${CONDA_ENV_NAME}"
+set -u
 cd "${REPOSITORY_ROOT}"
 
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
