@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-from heatextremes.metrics import probability_of_exceedance_brier_score
+from heatextremes.metrics import (
+    brier_score_of_exceedance,
+    probability_of_exceedance,
+    probability_of_exceedance_brier_score,
+    probability_of_exceedance_contingency,
+)
 
 
 def test_poe_brier_score_matches_valid_time_and_broadcasts_dataarray_threshold() -> None:
@@ -75,3 +80,58 @@ def test_poe_brier_score_accepts_a_scalar_threshold_and_masks_missing_observatio
     result = probability_of_exceedance_brier_score(model_ensemble, observations, threshold=20)
 
     np.testing.assert_equal(result.values, [[0.0625, np.nan]])
+
+
+def test_direct_poe_and_brier_score_accept_daily_forecast_day_axes() -> None:
+    model = xr.DataArray(
+        [[[0.0, 10.0, 20.0, 30.0]]],
+        dims=("time", "forecast_day", "number"),
+        coords={
+            "time": np.array(["2024-01-01"], dtype="datetime64[ns]"),
+            "forecast_day": [1],
+            "number": [0, 1, 2, 3],
+        },
+    )
+    observations = xr.DataArray(
+        [[25.0]],
+        dims=("time", "forecast_day"),
+        coords={"time": model.time, "forecast_day": model.forecast_day},
+    )
+
+    probability = probability_of_exceedance(model, threshold=20.0)
+    score = brier_score_of_exceedance(model, observations, threshold=20.0)
+
+    np.testing.assert_equal(probability.values, [[0.25]])
+    np.testing.assert_equal(score.values, [[0.5625]])
+
+
+def test_poe_contingency_uses_member_probability_decision_threshold() -> None:
+    model = xr.DataArray(
+        [
+            [[0.0, 10.0, 20.0, 30.0]],
+            [[30.0, 30.0, 30.0, 30.0]],
+            [[0.0, 0.0, 0.0, 0.0]],
+            [[30.0, 30.0, 30.0, 30.0]],
+        ],
+        dims=("time", "forecast_day", "number"),
+        coords={
+            "time": np.arange(
+                np.datetime64("2024-01-01"), np.datetime64("2024-01-05"), np.timedelta64(1, "D")
+            ),
+            "forecast_day": [1],
+            "number": [0, 1, 2, 3],
+        },
+    )
+    observations = xr.DataArray(
+        [[25.0], [25.0], [10.0], [10.0]],
+        dims=("time", "forecast_day"),
+        coords={"time": model.time, "forecast_day": model.forecast_day},
+    )
+
+    result = probability_of_exceedance_contingency(
+        model, observations, threshold=20.0, decision_threshold=0.5
+    )
+
+    # 25% PoE with an observed event is a miss; then hit, true negative, FP.
+    np.testing.assert_equal(result.values[:, 0], [2, 1, 0, 3])
+    assert result.dtype == np.dtype("int8")

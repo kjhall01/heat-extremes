@@ -7,8 +7,6 @@ import xarray as xr
 
 from heatextremes.metrics._verification import (
     ENSEMBLE_MEMBER_DIM,
-    INITIALIZATION_TIME_DIM,
-    LEAD_TIME_DIM,
     match_observations,
     validate_forecast_and_observations,
     verification_time,
@@ -59,6 +57,32 @@ def coverage(
         observations, valid_time, model_ensemble
     )
 
+    result = central_ensemble_coverage(
+        model_ensemble,
+        observed_at_verification_time,
+        percentile=percentile,
+    )
+    return result.assign_coords(
+        verification_time=valid_time
+    )
+
+
+def central_ensemble_coverage(
+    model_ensemble: xr.DataArray,
+    observations: xr.DataArray,
+    percentile: float = 90.0,
+) -> xr.DataArray:
+    """Return central-interval coverage for already aligned observations.
+
+    This is the direct counterpart to :func:`coverage`: it does not perform a
+    valid-time lookup, so it is suitable for aggregated quantities such as
+    daily minima, means, and maxima that already share forecast case axes with
+    their observations.
+    """
+    percentile = _validate_percentile(percentile)
+    if ENSEMBLE_MEMBER_DIM not in model_ensemble.dims:
+        raise ValueError(f"model_ensemble must have a {ENSEMBLE_MEMBER_DIM!r} dimension")
+
     lower_quantile = (100.0 - percentile) / 200.0
     upper_quantile = 1.0 - lower_quantile
     ensemble_for_quantiles = _single_member_chunk(model_ensemble)
@@ -68,14 +92,8 @@ def coverage(
     lower_bound = interval.isel(quantile=0, drop=True)
     upper_bound = interval.isel(quantile=1, drop=True)
 
-    is_covered = (lower_bound <= observed_at_verification_time) & (
-        observed_at_verification_time <= upper_bound
-    )
-    has_valid_values = (
-        observed_at_verification_time.notnull()
-        & lower_bound.notnull()
-        & upper_bound.notnull()
-    )
+    is_covered = (lower_bound <= observations) & (observations <= upper_bound)
+    has_valid_values = observations.notnull() & lower_bound.notnull() & upper_bound.notnull()
     result = is_covered.where(has_valid_values).astype(float)
 
     model_dimensions = tuple(
@@ -84,10 +102,7 @@ def coverage(
     extra_dimensions = tuple(
         dimension for dimension in result.dims if dimension not in model_dimensions
     )
-    result = result.transpose(*model_dimensions, *extra_dimensions)
-    return result.rename("coverage").assign_coords(
-        verification_time=valid_time
-    ).assign_attrs(
+    return result.transpose(*model_dimensions, *extra_dimensions).rename("coverage").assign_attrs(
         {
             "long_name": "central ensemble interval coverage indicator",
             "description": (
@@ -113,14 +128,15 @@ def _validate_inputs(
     percentile: float,
 ) -> float:
     """Validate required dimensions, coordinates, and percentile."""
+    validate_forecast_and_observations(model_ensemble, observations)
+    return _validate_percentile(percentile)
+
+
+def _validate_percentile(percentile: float) -> float:
     try:
         percentile = float(percentile)
     except (TypeError, ValueError) as error:
         raise ValueError("percentile must be a number between 0 and 100") from error
-
     if not np.isfinite(percentile) or not 0.0 <= percentile <= 100.0:
         raise ValueError("percentile must be a finite number between 0 and 100")
-
-    validate_forecast_and_observations(model_ensemble, observations)
-
     return percentile

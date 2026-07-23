@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-from heatextremes.metrics import coverage
+from heatextremes.metrics import central_ensemble_coverage, coverage
 
 
 def test_coverage_uses_verification_time_and_broadcasts_other_dimensions() -> None:
@@ -87,3 +87,24 @@ def test_coverage_is_nan_when_a_verification_observation_is_unavailable() -> Non
     result = coverage(model_ensemble, observations)
 
     np.testing.assert_equal(result.values, [[1.0, np.nan]])
+
+
+def test_direct_coverage_accepts_daily_forecast_day_axes() -> None:
+    model = xr.DataArray(
+        [[[0.0, 10.0, 20.0, 30.0]]],
+        dims=("time", "forecast_day", "number"),
+        coords={
+            "time": np.array(["2024-01-01"], dtype="datetime64[ns]"),
+            "forecast_day": [1],
+            "number": [0, 1, 2, 3],
+        },
+    )
+    observations = xr.DataArray(
+        [[15.0]],
+        dims=("time", "forecast_day"),
+        coords={"time": model.time, "forecast_day": model.forecast_day},
+    )
+
+    result = central_ensemble_coverage(model, observations, percentile=90)
+
+    np.testing.assert_equal(result.values, [[1.0]])

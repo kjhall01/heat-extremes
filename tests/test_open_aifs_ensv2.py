@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-from heatextremes.open_aifs_ensv2 import daily_aifs_aggregates
+from pathlib import Path
+
+from heatextremes.open_aifs_ensv2 import _forecast_store_year, daily_aifs_aggregates
 
 
 def test_daily_aifs_aggregates_returns_daily_forecast_temperature() -> None:
@@ -55,3 +57,8 @@ def test_daily_aifs_aggregates_limits_the_number_of_complete_days() -> None:
     assert daily.sizes["prediction_timedelta"] == 1
     np.testing.assert_allclose(daily["t2m_min_6h"].values, [[0.0]])
     np.testing.assert_allclose(daily["t2m_mean_6h"].values, [[1.5]])
+
+
+def test_forecast_store_year_reads_a_year_from_a_store_name() -> None:
+    assert _forecast_store_year(Path("aifs_2024-06-01T00:00:00.zarr")) == 2024
+    assert _forecast_store_year(Path("not-a-date.zarr")) is None
