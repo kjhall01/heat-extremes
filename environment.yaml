@@ -19,4 +19,4 @@ dependencies:
   - gcsfs
   - pip
   - pip:
-      - -e ./heatextremes
+      - -e .
