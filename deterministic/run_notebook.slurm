@@ -3,8 +3,9 @@
 #SBATCH --partition=general
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=256G
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -46,14 +47,20 @@ mkdir -p logs
 #     (`:  "${VAR:=default}"` only sets VAR if it isn't already in the
 #     environment, so anything passed via --export takes precedence). ---
 : "${TEST_YEAR_START:=2022}"
-: "${TEST_YEAR_END:=2025}"    # inclusive; set > TEST_YEAR_START for a multi-year run
-: "${REGION_BOUNDS:="global"}"   # south,north,west,east (degrees); or "global" for the full grid
-: "${VARIABLE:=t2m_min_6h}" # t2m_mean_6h, t2m_max_6h, t2m_min_6h, or total_precipitation.
-                             # Absolute (35 degC) applies to the three temperature variables only,
-                             # not total_precipitation. Relative (percentile) applies to all except
-                             # t2m_mean_6h (no precomputed climatology file for the daily mean).
+: "${TEST_YEAR_END:=2022}"    # inclusive; set > TEST_YEAR_START for a multi-year run
+: "${REGION_BOUNDS:=global}"   # south,north,west,east (degrees); or "global" for the full grid
+: "${VARIABLE:=t_wb_2m_mean_6h}" # t2m_mean_6h, t2m_max_6h, t2m_min_6h, total_precipitation, or the
+                             # wet-bulb-temperature equivalents t_wb_2m_mean_6h/t_wb_2m_max_6h/
+                             # t_wb_2m_min_6h (Stull 2011 approximation from 2m_temperature +
+                             # 2m_dewpoint_temperature -- see wetbulb.py).
+                             # Absolute (35 degC) applies to every temperature variable, including
+                             # wet-bulb, but not total_precipitation. Relative (percentile) applies
+                             # only to t2m_max_6h/t2m_min_6h/total_precipitation -- there's no
+                             # precomputed climatology file for the daily mean or for any wet-bulb
+                             # variable, so those always run absolute-only.
 : "${RELATIVE_PERCENTILE:=0.95}" # 0.95, 0.99, or 0.999 -- only used when VARIABLE is
-                                 # t2m_max_6h/t2m_min_6h/total_precipitation; ignored for t2m_mean_6h
+                                 # t2m_max_6h/t2m_min_6h/total_precipitation; ignored for
+                                 # t2m_mean_6h and every t_wb_2m_*_6h wet-bulb variable
 export TEST_YEAR_START TEST_YEAR_END REGION_BOUNDS VARIABLE RELATIVE_PERCENTILE
 
 # Dask cluster sizing -- kept in sync with --cpus-per-task/--mem above by
@@ -61,9 +68,9 @@ export TEST_YEAR_START TEST_YEAR_END REGION_BOUNDS VARIABLE RELATIVE_PERCENTILE
 # the notebook's own hardcoded fallback, which doesn't know what Slurm gave
 # it. Lower MEMORY_LIMIT is a *per-worker* cap; N_WORKERS * MEMORY_LIMIT
 # should stay comfortably under --mem above.
-: "${N_WORKERS:=${SLURM_CPUS_PER_TASK:-6}}"
+: "${N_WORKERS:=${SLURM_CPUS_PER_TASK:=8}}"
 : "${THREADS_PER_WORKER:=1}"
-: "${MEMORY_LIMIT:=8GiB}"
+: "${MEMORY_LIMIT:=32GiB}"
 export N_WORKERS THREADS_PER_WORKER MEMORY_LIMIT
 
 cd "$SLURM_SUBMIT_DIR"

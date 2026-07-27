@@ -33,6 +33,8 @@ import numpy as np
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
+import wetbulb  # local, no heatextremes dependency -- see wetbulb.py
+
 # Confirmed real filename pattern (from `ls` on the actual store):
 # init_20000101T00.zarr, init_20000107T00.zarr, ...
 _INIT_STORE_FILENAME = re.compile(r"^init_(\d{4})(\d{2})(\d{2})T\d{2}\.zarr$")
@@ -345,4 +347,77 @@ def daily_aifs_precipitation(
     daily = xr.Dataset({"total_precipitation": precipitation})
     if step_dim != output_step_dim:
         daily = daily.rename({step_dim: output_step_dim})
+    return daily
+
+
+def daily_aifs_wet_bulb_calendar_aligned(
+    ds: xr.Dataset,
+    max_days: int | None = None,
+    step_dim: str = "prediction_timedelta",
+    output_step_dim: str = "prediction_timedelta",
+) -> xr.Dataset:
+    """Daily mean/max/min wet-bulb temperature (Stull 2011), calendar-aligned.
+
+    Same day-boundary convention as `daily_aifs_aggregates_calendar_aligned`
+    above (`+1`/end-of-window labeling, confirmed against the real store's
+    `prediction_timedelta_daily`; day 1 is a genuine partial 3-sample bin --
+    see that function's docstring for the full justification, which applies
+    unchanged here since wet-bulb temperature is derived from the same
+    6-hourly `2m_temperature`/`2m_dewpoint_temperature` fields, not a
+    separately-stored daily variable the way `total_precipitation` is).
+
+    Takes the RAW `ds` -- both `2m_temperature` and `2m_dewpoint_temperature`
+    still in Kelvin, as they come straight off `open_aifs_singlev2`, *not*
+    already Kelvin-converted the way `_build_notebook.py`'s Step 2 cell
+    converts `2m_temperature` for the plain temperature variables.
+    `wetbulb.wet_bulb_temperature(..., input_units="K")` does its own
+    Kelvin-to-Celsius conversion internally, so an already-converted
+    `2m_temperature` here would be double-converted. See
+    `compute_model_var` in `_build_notebook.py`'s Step 2 cell: it skips the
+    in-place `2m_temperature -= 273.15` step whenever a wet-bulb variable is
+    selected, specifically so `model_batch` stays raw by the time this
+    function sees it.
+
+    Only an absolute threshold is supported for the resulting
+    `t_wb_2m_mean_6h`/`t_wb_2m_max_6h`/`t_wb_2m_min_6h` in the notebook --
+    see `wetbulb.py`'s module docstring and `era5_loader.daily_era5_wet_bulb_aggregates`
+    for why there's no relative/climatology-percentile option for this
+    variable yet.
+    """
+    required = {"2m_temperature", "2m_dewpoint_temperature"}
+    missing = required - set(ds.data_vars)
+    if missing:
+        raise KeyError(f"Dataset is missing required variables: {sorted(missing)}")
+    if step_dim not in ds.dims:
+        raise ValueError(f"Dataset must have a {step_dim} dimension")
+    if step_dim not in ds.coords:
+        raise ValueError(f"Dataset must have a {step_dim} coordinate")
+
+    wet_bulb = wetbulb.wet_bulb_temperature(
+        ds["2m_temperature"], ds["2m_dewpoint_temperature"], input_units="K"
+    )
+    if max_days is not None:
+        if max_days < 1:
+            raise ValueError("max_days must be at least 1")
+        wet_bulb = wet_bulb.where(
+            wet_bulb[step_dim] < np.timedelta64(max_days, "D"),
+            drop=True,
+        )
+
+    # +1: end-of-window labeling -- see daily_aifs_aggregates_calendar_aligned
+    # above for the full justification (identical here).
+    lead_day = (wet_bulb[step_dim] // np.timedelta64(1, "D")).astype(int) + 1
+    wet_bulb = wet_bulb.assign_coords(lead_day=(step_dim, lead_day.data))
+    grouped = wet_bulb.groupby("lead_day")
+
+    daily = xr.Dataset(
+        {
+            "t_wb_2m_mean_6h": grouped.mean(),
+            "t_wb_2m_max_6h": grouped.max(),
+            "t_wb_2m_min_6h": grouped.min(),
+        }
+    )
+    daily = daily.assign_coords(
+        lead_day=daily["lead_day"].values.astype("timedelta64[D]").astype("timedelta64[ns]")
+    ).rename({"lead_day": output_step_dim})
     return daily

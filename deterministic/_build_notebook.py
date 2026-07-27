@@ -66,16 +66,22 @@ wherever they apply to the selected `variable`.
 
 **Extreme-event variable is selectable** (`variable` in Step 0, or the
 `VARIABLE` environment variable): `t2m_mean_6h` (daily mean, the default),
-`t2m_max_6h` (daily max), `t2m_min_6h` (daily min) 2m air temperature, or
-`total_precipitation` (daily total) -- all four are computed regardless of
-which is selected (Step 2). Which threshold definition(s) actually run
-depends on `variable` (`has_absolute_threshold`/`has_relative_climatology`
-in Step 0, both derived from `variable`, not separate switches):
+`t2m_max_6h` (daily max), `t2m_min_6h` (daily min) 2m air temperature,
+`total_precipitation` (daily total), or the wet-bulb-temperature equivalents
+`t_wb_2m_mean_6h`/`t_wb_2m_max_6h`/`t_wb_2m_min_6h` (daily mean/max/min
+wet-bulb temperature, via Stull (2011)'s empirical approximation from
+`2m_temperature` + `2m_dewpoint_temperature` -- see `wetbulb.py`) -- all
+seven are computed regardless of which is selected (Step 2). Which threshold
+definition(s) actually run depends on `variable`
+(`has_absolute_threshold`/`has_relative_climatology` in Step 0, both derived
+from `variable`, not separate switches):
 
-- **Absolute** (`variable > 35`degC): temperature variables only
-  (`t2m_mean_6h`/`t2m_max_6h`/`t2m_min_6h`). **Skipped** for
-  `total_precipitation` -- 35 doesn't mean anything in precipitation's units
-  (meters/day).
+- **Absolute** (`variable > 35`degC): temperature variables only, including
+  wet-bulb (`t2m_mean_6h`/`t2m_max_6h`/`t2m_min_6h`/`t_wb_2m_mean_6h`/
+  `t_wb_2m_max_6h`/`t_wb_2m_min_6h` -- 35 degC wet-bulb happens to also be
+  the commonly-cited human heat-stress survivability limit, so the same
+  number does double duty). **Skipped** for `total_precipitation` -- 35
+  doesn't mean anything in precipitation's units (meters/day).
 - **Relative** (`variable` above `relative_percentile` -- 0.95, 0.99, or
   0.999, default 0.95, also settable via the `RELATIVE_PERCENTILE`
   environment variable -- of its 1979-2018 daily climatology at that grid
@@ -83,9 +89,10 @@ in Step 0, both derived from `variable`, not separate switches):
   exists for `variable` -- `t2m_max_6h`, `t2m_min_6h`, or
   `total_precipitation` (from `/net/monsoon/aasch/percentiles/`, via
   `climatology.open_percentile_climatology`). **Skipped** for
-  `t2m_mean_6h` -- there's no precomputed daily-mean climatology file, so
-  that case runs absolute-only. `total_precipitation` is the reverse case:
-  relative-only, absolute skipped.
+  `t2m_mean_6h` and every `t_wb_2m_*_6h` variable -- there's no precomputed
+  daily-mean (or wet-bulb) climatology file, so those cases run
+  absolute-only. `total_precipitation` is the reverse case: relative-only,
+  absolute skipped.
 
 **Steps below, each runnable and inspectable on its own:**
 
@@ -126,8 +133,10 @@ Imports, configuration, and the dask cluster. The settings you'll actually
 change between runs are `test_year_start`/`test_year_end` (inclusive; set
 them equal for a single year, or apart for a multi-year run), `region_bounds`
 (a `(south, north, west, east)` box in degrees, or `None` for the full global
-grid), and `variable` (`t2m_mean_6h`, `t2m_max_6h`, `t2m_min_6h`, or
-`total_precipitation`)."""
+grid), and `variable` (`t2m_mean_6h`, `t2m_max_6h`, `t2m_min_6h`,
+`total_precipitation`, or the wet-bulb-temperature equivalents
+`t_wb_2m_mean_6h`/`t_wb_2m_max_6h`/`t_wb_2m_min_6h`, absolute-threshold only
+-- see `wetbulb.py`)."""
 ))
 
 cells.append(nbf.v4.new_code_cell(
@@ -144,12 +153,17 @@ import numpy as np
 import xarray as xr
 from zarr.errors import ZarrUserWarning
 
-from era5_loader import open_cached_era5, daily_era5_aggregates  # local, no heatextremes dependency
+from era5_loader import (
+    open_cached_era5,
+    daily_era5_aggregates,
+    daily_era5_wet_bulb_aggregates,  # local, no heatextremes dependency
+)
 
 from aifs_singlev2 import (
     open_aifs_singlev2,
     daily_aifs_aggregates_calendar_aligned,
     daily_aifs_precipitation,  # total_precipitation is already daily in the real store -- see its docstring
+    daily_aifs_wet_bulb_calendar_aligned,  # t_wb_2m_mean_6h/t_wb_2m_max_6h/t_wb_2m_min_6h -- see wetbulb.py
 )
 from climatology import open_percentile_climatology, threshold_at_verification_time  # local relative-threshold helpers
 from deterministic_metrics import (
@@ -164,14 +178,32 @@ from deterministic_metrics import (
     symmetric_extremal_dependence_index,
 )
 
+def _env(name: str, default=None):
+    \"\"\"Like os.environ.get, but treats an unset or empty-string variable
+    the same way (falls back to default either way).
+
+    Plain os.environ.get(name, default) only substitutes default when the
+    key is entirely absent -- a variable that's exported but set to an
+    empty string (e.g. left blank in an interactive shell, or a Slurm
+    --export value that expanded to nothing) comes back as an empty string
+    instead, silently bypassing the default -- int() on an empty string
+    then raises a confusing ValueError downstream. The shell side of this
+    notebook (run_notebook.slurm's parameter-expansion defaults) already
+    treats unset-or-empty the same way; this makes the Python side
+    consistent with it.
+    \"\"\"
+    value = os.environ.get(name)
+    return default if not value else value
+
+
 # --- The settings you'll actually change between runs ---
 # Each reads an environment variable first, falling back to the hardcoded
 # default if that variable isn't set -- so a Slurm submit script can control
 # these without editing this file (see run_notebook.slurm, which sets
 # TEST_YEAR_START/TEST_YEAR_END/REGION_BOUNDS before generating this
 # notebook). Editing the defaults below still works fine for interactive use.
-test_year_start = int(os.environ.get("TEST_YEAR_START", 2022))
-test_year_end = int(os.environ.get("TEST_YEAR_END", 2022))  # inclusive; > test_year_start for multi-year
+test_year_start = int(_env("TEST_YEAR_START", 2022))
+test_year_end = int(_env("TEST_YEAR_END", 2022))  # inclusive; > test_year_start for multi-year
 
 # Region to restrict both model and ERA5 to, as (south, north, west, east) in
 # degrees -- e.g. the Delhi, India default below. A small region keeps every
@@ -182,7 +214,7 @@ test_year_end = int(os.environ.get("TEST_YEAR_END", 2022))  # inclusive; > test_
 #
 # REGION_BOUNDS env var format: "south,north,west,east" (e.g.
 # "27.5,29.5,76.5,78.5"), or the literal "global" for the full grid (None).
-_region_bounds_env = os.environ.get("REGION_BOUNDS")
+_region_bounds_env = _env("REGION_BOUNDS")
 if _region_bounds_env is None:
     region_bounds = (27.5, 29.5, 76.5, 78.5)  # Delhi, India; set to None for global
 elif _region_bounds_env.strip().lower() == "global":
@@ -195,26 +227,44 @@ else:
             f"got: {_region_bounds_env!r}"
         )
 
-# Which daily-aggregated quantity to run the whole exercise against. All four
-# are computed by daily_era5_aggregates()/daily_aifs_aggregates_calendar_aligned()/
-# daily_aifs_precipitation() (Step 2) regardless of this setting, so switching
-# it doesn't need new data -- just re-running from Step 2 onward (or the whole
-# notebook) with a different value.
-_allowed_variables = {"t2m_mean_6h", "t2m_max_6h", "t2m_min_6h", "total_precipitation"}
-variable = os.environ.get("VARIABLE", "t2m_mean_6h")
+# Which daily-aggregated quantity to run the whole exercise against. All seven
+# are computed by daily_era5_aggregates()/daily_era5_wet_bulb_aggregates()/
+# daily_aifs_aggregates_calendar_aligned()/daily_aifs_precipitation()/
+# daily_aifs_wet_bulb_calendar_aligned() (Step 2) regardless of this setting,
+# so switching it doesn't need new data -- just re-running from Step 2 onward
+# (or the whole notebook) with a different value.
+_allowed_variables = {
+    "t2m_mean_6h", "t2m_max_6h", "t2m_min_6h", "total_precipitation",
+    "t_wb_2m_mean_6h", "t_wb_2m_max_6h", "t_wb_2m_min_6h",
+}
+variable = _env("VARIABLE", "t2m_mean_6h")
 if variable not in _allowed_variables:
     raise ValueError(f"VARIABLE must be one of {sorted(_allowed_variables)}, got: {variable!r}")
+
+# Wet-bulb variables (2m air temperature + dewpoint combined via Stull
+# (2011)'s empirical approximation -- see wetbulb.py) need a couple of
+# special cases below, since they're derived from two raw variables rather
+# than resampled directly from one: Step 2 skips the in-place Kelvin-to-degC
+# conversion of 2m_temperature for these (wetbulb.wet_bulb_temperature needs
+# the RAW Kelvin value and does its own conversion internally -- converting
+# 2m_temperature first would double-convert it), and compute_model_var
+# (also Step 2) dispatches to daily_aifs_wet_bulb_calendar_aligned instead of
+# the plain temperature aggregator.
+wet_bulb_variables = {"t_wb_2m_mean_6h", "t_wb_2m_max_6h", "t_wb_2m_min_6h"}
 
 forecast_days = 10  # daily aggregation covers lead days up to (and including) day 9
 lead_days_to_plot = [1, 3, 5, 7, 9]
 
-# Absolute threshold: 35 degC, temperature-only -- doesn't apply to
-# total_precipitation (units: meters/day), so it's automatically skipped for
-# that variable (has_absolute_threshold below), not applied with a
-# meaningless number. Note daily *minimum* T2M exceeding 35 degC is a much
-# more extreme, rarer event than daily mean or max doing so (it means the
-# temperature never dropped below 35 degC all day/night) -- Step 3's sanity
-# check will make that obvious if so.
+# Absolute threshold: 35 degC, temperature-only (including wet-bulb
+# temperature -- 35 degC wet-bulb is itself the commonly-cited human
+# heat-stress survivability limit, so the same number does double duty
+# here) -- doesn't apply to total_precipitation (units: meters/day), so it's
+# automatically skipped for that variable (has_absolute_threshold below),
+# not applied with a meaningless number. Note daily *minimum* T2M (or
+# wet-bulb T) exceeding 35 degC is a much more extreme, rarer event than
+# daily mean or max doing so (it means the temperature never dropped below
+# 35 degC all day/night) -- Step 3's sanity check will make that obvious if
+# so.
 absolute_threshold = 35.0  # degC
 has_absolute_threshold = variable != "total_precipitation"
 
@@ -222,11 +272,12 @@ has_absolute_threshold = variable != "total_precipitation"
 # precomputed 1979-2018 daily percentile climatology (see climatology.py's
 # CLIMATOLOGY_PATHS) instead of computing one from scratch. Only available
 # for t2m_max_6h/t2m_min_6h/total_precipitation -- there's no precomputed
-# file for the daily mean -- so it's automatically skipped when variable is
-# t2m_mean_6h. No separate on/off switch needed: has_relative_climatology
-# below is derived from variable, not a config flag of its own.
+# file for the daily mean, nor for any of the wet-bulb variables -- so it's
+# automatically skipped when variable is t2m_mean_6h or any t_wb_2m_*_6h.
+# No separate on/off switch needed: has_relative_climatology below is
+# derived from variable, not a config flag of its own.
 _allowed_percentiles = {0.95, 0.99, 0.999}  # the quantiles actually present in the precomputed files
-relative_percentile = float(os.environ.get("RELATIVE_PERCENTILE", 0.95))
+relative_percentile = float(_env("RELATIVE_PERCENTILE", 0.95))
 if relative_percentile not in _allowed_percentiles:
     raise ValueError(
         f"RELATIVE_PERCENTILE must be one of {sorted(_allowed_percentiles)}, got: {relative_percentile}"
@@ -278,9 +329,9 @@ cells.append(nbf.v4.new_code_cell(
 # first (see run_notebook.slurm, which derives these from the job's own
 # --cpus-per-task/--mem so they can't silently drift out of sync with what
 # Slurm actually granted).
-n_workers = int(os.environ.get("N_WORKERS", 6))              # match the CPUs you requested
-threads_per_worker = int(os.environ.get("THREADS_PER_WORKER", 1))
-memory_limit = os.environ.get("MEMORY_LIMIT", "3GiB")  # tune to your node memory -- global, multi-decade
+n_workers = int(_env("N_WORKERS", 6))              # match the CPUs you requested
+threads_per_worker = int(_env("THREADS_PER_WORKER", 1))
+memory_limit = _env("MEMORY_LIMIT", "3GiB")  # tune to your node memory -- global, multi-decade
                                                         # data needs more than the small single-region demo
                                                         # this notebook started from
 
@@ -362,12 +413,17 @@ region keeps that cheap even over the full year range, so there's no need
 to also throw away initializations to get a fast run. Set
 `region_bounds = None` in the Step 0 config cell for the real global run.
 
-**Units:** both ERA5 and AIFS-single-v2 store `2m_temperature` natively in
-Kelvin (AIFS inherits this from being trained on ERA5) -- neither
-`open_cached_era5`/`daily_era5_aggregates` nor `open_aifs_singlev2` convert
-it. Converted to degC below, right after regridding/subsetting and before
-daily aggregation, so it's comparable against `absolute_threshold` (degC)
-everywhere downstream.
+**Units:** both ERA5 and AIFS-single-v2 store `2m_temperature` (and
+`2m_dewpoint_temperature`) natively in Kelvin (AIFS inherits this from being
+trained on ERA5) -- neither `open_cached_era5`/`daily_era5_aggregates` nor
+`open_aifs_singlev2` convert it. Converted to degC below, right after
+regridding/subsetting and before daily aggregation, so it's comparable
+against `absolute_threshold` (degC) everywhere downstream -- **except when
+`variable` is one of the wet-bulb variables** (`wet_bulb_variables` in Step
+0): `wetbulb.wet_bulb_temperature` needs the RAW Kelvin values and does its
+own conversion internally, so the in-place `2m_temperature -= 273.15` step
+below is skipped entirely in that case (for both `model` and `era5`) to
+avoid double-converting it.
 
 **What "align" means here -- spatial only, not time.** `xr.align(...,
 exclude={"time", "prediction_timedelta"})` below only aligns the
@@ -421,13 +477,26 @@ if region_bounds is not None:
 # Subtracting a constant commutes with both mean() and max(), so converting
 # before vs. after daily_era5_aggregates()/daily_aifs_aggregates_calendar_aligned()
 # is equivalent.
+#
+# Wet-bulb variables are the exception: wetbulb.wet_bulb_temperature needs
+# RAW Kelvin 2m_temperature/2m_dewpoint_temperature and does its own
+# conversion internally (see daily_era5_wet_bulb_aggregates/
+# daily_aifs_wet_bulb_calendar_aligned's docstrings) -- converting
+# 2m_temperature in place first would double-convert it. So for those
+# variables, skip the in-place conversion for *both* model and era5 (model's
+# conversion is skipped too, even though model's own aggregation happens
+# later in compute_model_var below, since model_batch there needs to still
+# be raw Kelvin when daily_aifs_wet_bulb_calendar_aligned runs on it), and
+# call daily_era5_wet_bulb_aggregates instead of daily_era5_aggregates.
 KELVIN_TO_CELSIUS_OFFSET = 273.15
-model["2m_temperature"] = model["2m_temperature"] - KELVIN_TO_CELSIUS_OFFSET
-model["2m_temperature"].attrs["units"] = "degC"
-era5["2m_temperature"] = era5["2m_temperature"] - KELVIN_TO_CELSIUS_OFFSET
-era5["2m_temperature"].attrs["units"] = "degC"
-
-era5 = daily_era5_aggregates(era5)
+if variable in wet_bulb_variables:
+    era5 = daily_era5_wet_bulb_aggregates(era5)
+else:
+    model["2m_temperature"] = model["2m_temperature"] - KELVIN_TO_CELSIUS_OFFSET
+    model["2m_temperature"].attrs["units"] = "degC"
+    era5["2m_temperature"] = era5["2m_temperature"] - KELVIN_TO_CELSIUS_OFFSET
+    era5["2m_temperature"].attrs["units"] = "degC"
+    era5 = daily_era5_aggregates(era5)
 
 # Spatial alignment only -- see markdown above for why time is deliberately
 # left unaligned (matched later, per-case, at verification time in Step 4).
@@ -534,10 +603,17 @@ def compute_model_var(model_batch: xr.Dataset) -> xr.DataArray:
     total_precipitation is already daily in the real store (under
     prediction_timedelta_daily, confirmed against a real Dataset repr --
     see aifs_singlev2.daily_aifs_precipitation), so it's read directly
-    instead, no resampling needed.
+    instead, no resampling needed. Wet-bulb variables
+    (t_wb_2m_mean_6h/t_wb_2m_max_6h/t_wb_2m_min_6h) go through
+    daily_aifs_wet_bulb_calendar_aligned, which computes wet-bulb temperature
+    from model_batch's still-raw-Kelvin 2m_temperature/2m_dewpoint_temperature
+    (see the wet_bulb_variables branch above, which deliberately leaves
+    model's 2m_temperature unconverted for this reason) before aggregating.
     \"\"\"
     if variable == "total_precipitation":
         return daily_aifs_precipitation(model_batch, max_days=forecast_days)["total_precipitation"]
+    if variable in wet_bulb_variables:
+        return daily_aifs_wet_bulb_calendar_aligned(model_batch, max_days=forecast_days)[variable]
     return daily_aifs_aggregates_calendar_aligned(model_batch, max_days=forecast_days)[variable]
 
 
@@ -551,7 +627,8 @@ cells.append(nbf.v4.new_markdown_cell(
 
 Before running the expensive batched pass in Step 4, sanity-check that
 `variable` (currently whichever of `t2m_mean_6h`/`t2m_max_6h`/`t2m_min_6h`/
-`total_precipitation` is configured in Step 0) looks physically reasonable --
+`total_precipitation`/`t_wb_2m_mean_6h`/`t_wb_2m_max_6h`/`t_wb_2m_min_6h` is
+configured in Step 0) looks physically reasonable --
 right order of magnitude, right units (degC not Kelvin for temperature;
 meters for precipitation), and actually crosses whichever threshold(s) are
 active at least sometimes (otherwise Step 5's POD/FAR/SEDI will be all-NaN

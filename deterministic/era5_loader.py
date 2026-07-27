@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+import wetbulb  # local, no heatextremes dependency -- see wetbulb.py
 
 DEFAULT_ROOT = Path("/net/monsoon/kylehall/ERA5/era5_arco_6h_surface")
 STORE_PREFIX = "era5_arco_6h_surface"
@@ -113,5 +114,50 @@ def daily_era5_aggregates(ds: xr.Dataset) -> xr.Dataset:
             "t2m_max_6h": ds["2m_temperature"].resample(time="1D").max(),
             "t2m_min_6h": ds["2m_temperature"].resample(time="1D").min(),
             "total_precipitation": precipitation.resample(time="1D").sum(min_count=4),
+        }
+    )
+
+
+def daily_era5_wet_bulb_aggregates(ds: xr.Dataset) -> xr.Dataset:
+    """Return UTC-day mean/max/min wet-bulb temperature (Stull 2011 approximation).
+
+    A separate function rather than three more entries folded into
+    `daily_era5_aggregates`, since wet-bulb temperature is *derived* from two
+    raw variables combined (`2m_temperature`, `2m_dewpoint_temperature`) via
+    `wetbulb.wet_bulb_temperature`, not a direct resample of one variable
+    already sitting in `ds` the way t2m_mean_6h/t2m_max_6h/t2m_min_6h/
+    total_precipitation are.
+
+    Takes the RAW dataset (both temperature and dewpoint still in Kelvin,
+    same as straight off `open_cached_era5` -- *not* already Kelvin-converted
+    the way `daily_era5_aggregates`'s caller converts `2m_temperature` before
+    calling it): `wetbulb.wet_bulb_temperature(..., input_units="K")` does
+    its own Kelvin-to-Celsius conversion internally, so passing an
+    already-converted `2m_temperature` here would double-convert it. See
+    `_build_notebook.py`'s Step 2 cell, which branches on this (skips the
+    in-place `2m_temperature -= 273.15` step whenever a wet-bulb variable is
+    selected, specifically to keep this function's input raw).
+
+    Only an absolute threshold is supported for the resulting
+    `t_wb_2m_mean_6h`/`t_wb_2m_max_6h`/`t_wb_2m_min_6h` in the notebook --
+    there is no precomputed percentile-climatology file for wet-bulb
+    temperature the way there is for `2m_temperature`/`total_precipitation`
+    (see `climatology.py`'s `CLIMATOLOGY_PATHS`), so a relative threshold
+    would need the expensive from-scratch `climatology.local_climatology_quantile`
+    path instead.
+    """
+    required = {"2m_temperature", "2m_dewpoint_temperature"}
+    missing = required - set(ds.data_vars)
+    if missing:
+        raise KeyError(f"Dataset is missing required variables: {sorted(missing)}")
+
+    wet_bulb = wetbulb.wet_bulb_temperature(
+        ds["2m_temperature"], ds["2m_dewpoint_temperature"], input_units="K"
+    )
+    return xr.Dataset(
+        {
+            "t_wb_2m_mean_6h": wet_bulb.resample(time="1D").mean(),
+            "t_wb_2m_max_6h": wet_bulb.resample(time="1D").max(),
+            "t_wb_2m_min_6h": wet_bulb.resample(time="1D").min(),
         }
     )
