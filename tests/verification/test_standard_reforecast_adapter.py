@@ -47,11 +47,11 @@ def test_standard_raw_adapter_builds_one_canonical_lead_without_compact_output(t
     threshold = xr.Dataset(
         {
             "t2m_daily_mean_calendar_day_percentile": (
-                ("percentile", "dayofyear", "latitude", "longitude"),
+                ("percentiles", "dayofyear", "latitude", "longitude"),
                 np.full((1, days.size, 1, longitude.size), 301.0),
             )
         },
-        coords={"percentile": [95.0], "dayofyear": days, "latitude": [0.0], "longitude": longitude},
+        coords={"percentiles": [95.0], "dayofyear": days, "latitude": [0.0], "longitude": longitude},
     )
     threshold_path = tmp_path / "threshold.zarr"
     _write_store(threshold, threshold_path)

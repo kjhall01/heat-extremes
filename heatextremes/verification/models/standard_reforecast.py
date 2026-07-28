@@ -139,8 +139,17 @@ class StandardReforecastAdapter(ModelAdapter):
             raise KeyError(f"Threshold store is missing {threshold_variable!r}")
         percentile = float(self.config.data.get("events", {}).get("percentile", 95.0))
         threshold = threshold_dataset[threshold_variable]
-        if "percentile" in threshold.dims:
-            threshold = threshold.sel(percentile=percentile, method="nearest")
+        percentile_dimensions = [name for name in ("percentiles", "percentile") if name in threshold.dims]
+        if len(percentile_dimensions) > 1:
+            raw.close()
+            threshold_dataset.close()
+            raise ValueError(
+                f"Threshold {threshold_variable!r} has ambiguous percentile dimensions: {percentile_dimensions}"
+            )
+        if percentile_dimensions:
+            # The verified climatology notebook writes ``percentiles``.
+            # Accept the singular spelling too for compatible future stores.
+            threshold = threshold.sel({percentile_dimensions[0]: percentile}, method="nearest", drop=True)
         threshold = self._helpers.map_threshold_to_forecast_grid(threshold, daily)
 
         observations = self.config.data["observations"]

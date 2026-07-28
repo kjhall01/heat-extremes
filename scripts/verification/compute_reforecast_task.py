@@ -16,7 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from heatextremes.verification.config import load_config
-from heatextremes.verification.io import assert_safe_result_path, now_utc, write_json_atomic
+from heatextremes.verification.io import (
+    assert_safe_result_path,
+    now_utc,
+    remove_result_path,
+    write_json_atomic,
+)
 from heatextremes.verification.runner import compute_partition
 
 
@@ -38,6 +43,7 @@ def main() -> None:
     task = tasks[args.task_index]
     config = load_config(task["config"])
     label = f"{int(task['year']):04d}-{int(task['month']):02d}"
+    failure = config.model_result_dir / "failures" / f"{label}.json"
     print(f"Model: {config.model_name}\nPartition: {label}\nManifest task: {args.task_index}", flush=True)
     try:
         result = compute_partition(
@@ -49,7 +55,6 @@ def main() -> None:
             repository_root=Path(__file__).resolve().parents[2],
         )
     except Exception as error:
-        failure = config.model_result_dir / "failures" / f"{label}.json"
         assert_safe_result_path(failure, config.result_root)
         write_json_atomic(
             {
@@ -68,6 +73,9 @@ def main() -> None:
         if args.raise_on_error:
             raise
         return
+    # A resumed partition can repair a previous isolated failure. Remove only
+    # this explicitly scoped marker so status inspection is not stale.
+    remove_result_path(failure, config.result_root)
     print(f"{'Skipped' if result.skipped else 'Completed'} {result.partition_directory}", flush=True)
 
 
