@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import xarray as xr
+
 from heatextremes.verification.reforecast_inventory import (
     inventory_metadata_csv,
     inventory_reforecast_root,
@@ -33,6 +36,47 @@ def test_inventory_scans_only_standard_init_store_names(tmp_path: Path) -> None:
     )
     assert config["model"]["adapter"] == "standard_reforecast_raw"
     assert config["selection"]["partitions"] == [{"year": 2022, "month": 6}]
+
+
+def test_inventory_uses_common_local_solar_leads_from_store_metadata(tmp_path: Path) -> None:
+    root = tmp_path / "reforecast"
+    source = root / "forecasts_short_horizon"
+    source.mkdir(parents=True)
+    longitude = np.asarray([0.0, 90.0, 180.0, 270.0])
+
+    def write_store(path: Path, step_count: int) -> None:
+        raw = xr.Dataset(
+            {
+                "2t": (
+                    ("time", "prediction_timedelta", "latitude", "longitude"),
+                    np.full((1, step_count, 1, longitude.size), 300.0),
+                )
+            },
+            coords={
+                "time": [np.datetime64("2022-06-01T00")],
+                "prediction_timedelta": np.arange(step_count) * np.timedelta64(6, "h"),
+                "latitude": [0.0],
+                "longitude": longitude,
+            },
+        )
+        raw.to_zarr(path, mode="w", consolidated=True)
+
+    # The second store has one fewer complete local day. The generated model
+    # config must therefore use the common range rather than blindly using
+    # the historical 0--14 AIFS range.
+    write_store(source / "init_2022-06-01.zarr", step_count=60)
+    write_store(source / "init_2022-07-01.zarr", step_count=56)
+
+    inventory = inventory_reforecast_root(root, years=[2022], months=[6, 7])
+    assert len(inventory) == 1
+    discovered_days = inventory[0].forecast_days
+    assert discovered_days
+    assert max(discovered_days) < 14
+
+    config = raw_reforecast_config(
+        inventory[0], result_root=tmp_path / "results", region_file=tmp_path / "regions.yaml"
+    )
+    assert config["selection"]["forecast_days"] == list(discovered_days)
 
 
 def test_metadata_registry_sets_deterministic_capability_and_excludes_gencast(tmp_path: Path) -> None:

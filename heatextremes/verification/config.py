@@ -55,6 +55,7 @@ class VerificationConfig:
     data: dict[str, Any]
     config_hash: str
     case_cache_hash: str
+    compatible_case_cache_hashes: frozenset[str]
 
     @property
     def model_name(self) -> str:
@@ -133,6 +134,34 @@ class VerificationConfig:
             )
 
 
+def _case_cache_signature(data: Mapping[str, Any], forecast_days: list[int]) -> dict[str, Any]:
+    """Return the inputs that can change a canonical cache lead's values."""
+    return {
+        "case_cache_schema": 1,
+        "model": data["model"],
+        # The output root, region definitions, probability bins, and map
+        # selection do not change a canonical forecast/observation case.  By
+        # excluding them, users can make new regional/decision-threshold
+        # products from one durable case cache.
+        "paths": {
+            key: value
+            for key, value in data["paths"].items()
+            if key != "verification_results_root"
+        },
+        "variables": data.get("variables", {}),
+        "observations": data.get("observations", {}),
+        "events": data.get("events", {}),
+        "forecast_days": forecast_days,
+        "interval_levels": list(data["metrics"]["interval_levels"]),
+    }
+
+
+def _hash_case_cache_signature(signature: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(signature, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def load_config(
     path: str | Path,
     *,
@@ -185,32 +214,30 @@ def load_config(
         separators=(",", ":"),
         default=str,
     )
-    cache_signature = {
-        "case_cache_schema": 1,
-        "model": data["model"],
-        # The output root, region definitions, probability bins, and map
-        # selection do not change a canonical forecast/observation case.  By
-        # excluding them, users can make new regional/decision-threshold
-        # products from one durable case cache.
-        "paths": {
-            key: value
-            for key, value in data["paths"].items()
-            if key != "verification_results_root"
-        },
-        "variables": data.get("variables", {}),
-        "observations": data.get("observations", {}),
-        "events": data.get("events", {}),
-        "forecast_days": list(data["selection"]["forecast_days"]),
-        "interval_levels": list(data["metrics"]["interval_levels"]),
-    }
-    case_cache_hash = hashlib.sha256(
-        json.dumps(cache_signature, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()
+    configured_days = [int(value) for value in data["selection"]["forecast_days"]]
+    case_cache_hash = _hash_case_cache_signature(_case_cache_signature(data, configured_days))
+    compatible_hashes = {case_cache_hash}
+    # Before per-model lead discovery, standard raw reforecast configs always
+    # used 0--14. A shorter discovered range is scientifically identical for
+    # a successfully committed source lead when the raw product itself ends
+    # before day 14. Accept that exact historical signature so a failed final
+    # lead can be resumed without discarding the good preceding lead stores.
+    historical_days = list(range(15))
+    is_zero_based_prefix = configured_days == list(range(len(configured_days)))
+    if (
+        data["model"].get("adapter") == "standard_reforecast_raw"
+        and is_zero_based_prefix
+        and len(configured_days) < len(historical_days)
+    ):
+        compatible_hashes.add(
+            _hash_case_cache_signature(_case_cache_signature(data, historical_days))
+        )
     return VerificationConfig(
         path=config_path,
         data=data,
         config_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         case_cache_hash=case_cache_hash,
+        compatible_case_cache_hashes=frozenset(compatible_hashes),
     )
 
 

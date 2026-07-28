@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
+
+import xarray as xr
 
 
 _DATE_PATTERNS = (
@@ -31,6 +33,8 @@ class ReforecastModelInventory:
     ensemble: bool
     source_temperature_variable: str
     source_store_glob: str
+    forecast_days: tuple[int, ...] = tuple(range(15))
+    lead_inventory_errors: tuple[str, ...] = ()
 
 
 def store_year_month(path: Path) -> tuple[int, int] | None:
@@ -69,14 +73,16 @@ def inventory_reforecast_root(
             raise ValueError(f"Reforecast model-name collision after normalization: {model_name}")
         names.add(model_name)
         found.append(
-            _inventory_directory(
-                name=model_name,
-                display_name=model_name.replace("_", " ").title(),
-                directory=directory,
-                wanted=wanted,
-                ensemble=True,
-                source_temperature_variable="2t",
-                source_store_glob="init_*.zarr",
+            _with_available_forecast_days(
+                _inventory_directory(
+                    name=model_name,
+                    display_name=model_name.replace("_", " ").title(),
+                    directory=directory,
+                    wanted=wanted,
+                    ensemble=True,
+                    source_temperature_variable="2t",
+                    source_store_glob="init_*.zarr",
+                )
             )
         )
     return found
@@ -111,6 +117,64 @@ def _inventory_directory(
         ensemble=ensemble,
         source_temperature_variable=source_temperature_variable,
         source_store_glob=source_store_glob,
+    )
+
+
+def available_local_solar_forecast_days(store: Path, source_temperature_variable: str) -> tuple[int, ...]:
+    """Inspect metadata for the exact verified local-solar lead labels.
+
+    This opens only one Zarr store's metadata and coordinate arrays.  The
+    verified local-day function remains lazy: no temperature chunks are read.
+    """
+    from .models.standard_reforecast import _processing_helpers
+
+    dataset = xr.open_zarr(store, consolidated=False, chunks={})
+    try:
+        if source_temperature_variable not in dataset:
+            raise KeyError(f"Missing source temperature variable {source_temperature_variable!r}")
+        temperature = dataset[source_temperature_variable]
+        if "prediction_timedelta" not in temperature.dims:
+            raise ValueError("Source temperature lacks prediction_timedelta")
+        # The source coordinate defines the actual maximum; 366 days is only
+        # an upper selection bound and does not request data beyond the store.
+        daily = _processing_helpers().local_solar_daily_mean_forecast(temperature, max_days=366)
+        return tuple(int(value) for value in daily["forecast_day"].values)
+    finally:
+        dataset.close()
+
+
+def _with_available_forecast_days(inventory: ReforecastModelInventory) -> ReforecastModelInventory:
+    """Use common valid leads across sampled selected months for one model.
+
+    The selected lead list must be valid for every submitted model/month task.
+    Inspecting one representative initialization per selected month is enough
+    because local-solar daily lead availability is determined by the store's
+    forecast-step coordinate, not by its temperature values.
+    """
+    stores_by_partition: dict[tuple[int, int], Path] = {}
+    for store in sorted(inventory.directory.glob(inventory.source_store_glob)):
+        partition = store_year_month(store)
+        if partition in inventory.partitions and partition not in stores_by_partition:
+            stores_by_partition[partition] = store
+    available_sets: list[set[int]] = []
+    errors: list[str] = []
+    for partition, store in sorted(stores_by_partition.items()):
+        try:
+            available_sets.append(
+                set(available_local_solar_forecast_days(store, inventory.source_temperature_variable))
+            )
+        except Exception as error:
+            errors.append(f"{partition[0]:04d}-{partition[1]:02d} metadata: {type(error).__name__}: {error}")
+    if not available_sets:
+        return replace(inventory, lead_inventory_errors=tuple(errors))
+    common = set.intersection(*available_sets)
+    if not common:
+        errors.append("No common local-solar forecast days across sampled selected partitions")
+        return replace(inventory, lead_inventory_errors=tuple(errors))
+    return replace(
+        inventory,
+        forecast_days=tuple(sorted(common)),
+        lead_inventory_errors=tuple(errors),
     )
 
 
@@ -153,7 +217,9 @@ def inventory_metadata_csv(
     ``N Members`` and permits a configured raw temperature source of either
     ``2t`` or ``2m_temperature``. AIFS-ENS-v2 is allowed outside the generic
     root because it is the established pilot source with ``*.zarr`` rather
-    than ``init_*.zarr`` names. The source stores are never opened here.
+    than ``init_*.zarr`` names. The inventory additionally opens Zarr metadata
+    and coordinates for one store per selected month to derive a safe common
+    local-solar forecast-day range; it never reads temperature chunks.
     """
     if not metadata_csv.is_file():
         raise FileNotFoundError(f"Model metadata CSV is missing: {metadata_csv}")
@@ -212,14 +278,18 @@ def inventory_metadata_csv(
                 seen_directories.add(resolved)
                 seen_names.add(name)
                 inventories.append(
-                    _inventory_directory(
-                        name=name,
-                        display_name=display_name,
-                        directory=directory,
-                        wanted=wanted,
-                        ensemble=ensemble,
-                        source_temperature_variable=variable,
-                        source_store_glob=("*.zarr" if display_name.casefold() in allowed_external else "init_*.zarr"),
+                    _with_available_forecast_days(
+                        _inventory_directory(
+                            name=name,
+                            display_name=display_name,
+                            directory=directory,
+                            wanted=wanted,
+                            ensemble=ensemble,
+                            source_temperature_variable=variable,
+                            source_store_glob=(
+                                "*.zarr" if display_name.casefold() in allowed_external else "init_*.zarr"
+                            ),
+                        )
                     )
                 )
     return inventories, skipped
@@ -268,8 +338,10 @@ def raw_reforecast_config(
             "years": years,
             "months": months,
             "partitions": partitions,
-            "forecast_days": list(range(15)),
-            "map_forecast_days": [0, 5, 10, 13],
+            "forecast_days": list(inventory.forecast_days),
+            "map_forecast_days": [
+                forecast_day for forecast_day in (0, 5, 10, 13) if forecast_day in inventory.forecast_days
+            ],
         },
         "chunking": {
             "raw": {

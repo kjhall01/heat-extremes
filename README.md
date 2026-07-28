@@ -52,7 +52,9 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
   --max-concurrent 1
 ```
 
-The inventory scans only directory and store names. A source failure is
+The inventory scans directory/store names and reads only metadata/coordinates
+from one source store per selected month to choose a lead range common to that
+model's JJAS tasks; it never reads temperature chunks. A source failure is
 recorded under the affected model's `failures/` directory and does not stop
 other models. Aggregate-only all-model figures are written under
 `/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results/_all_models/figures/`.
@@ -60,6 +62,14 @@ The default registry is `Rossby Model Storage Locations - Sheet1.csv`; it
 sets deterministic versus ensemble behavior, includes the pilot AIFS-ENS-v2
 source even though it lives outside the generic reforecast root, and explicitly
 excludes Gencast.
+
+If a prior standard-model task committed lead stores and then failed only at a
+historically hard-coded terminal lead, the refreshed shorter config adopts
+those compatible stores, writes the missing cache completion marker, and clears
+the failure status on the next task run. It does not reopen raw forecasts for
+that partition. If inventory cannot establish a common lead range from source
+metadata, it records the model as skipped rather than submitting an unsafe
+array task.
 
 The submitted chain is now `case cache → cache-backed metrics → aggregation →
 plots`. Each month/lead case store contains canonical local-solar daily

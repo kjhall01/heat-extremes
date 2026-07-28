@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Inventory standard raw reforecast directories and generate model configs.
 
-This scans only directory and ``init_*.zarr`` names; it never opens model
-arrays.  All manifests and generated configuration files are written beneath
-the explicitly supplied results root.
+This scans directory/store names plus Zarr metadata and coordinates for one
+store per selected month. It never loads model-temperature chunks. All
+manifests and generated configuration files are written beneath the explicitly
+supplied results root.
 """
 
 from __future__ import annotations
@@ -72,6 +73,15 @@ def main() -> None:
     records: list[dict[str, object]] = []
     tasks: list[dict[str, object]] = []
     for item in inventories:
+        if item.lead_inventory_errors:
+            skipped_models.append(
+                {
+                    "model": item.display_name,
+                    "reason": "could not establish a safe common local-solar forecast-day range: "
+                    + "; ".join(item.lead_inventory_errors),
+                }
+            )
+            continue
         config_path = config_directory / f"{item.name}.yaml"
         selected = [{"year": year, "month": month} for year, month in item.partitions]
         records.append(
@@ -84,6 +94,8 @@ def main() -> None:
                 "ensemble": item.ensemble,
                 "store_count": item.store_count,
                 "selected_partitions": selected,
+                "forecast_days": list(item.forecast_days),
+                "lead_inventory_errors": list(item.lead_inventory_errors),
                 "unparsed_store_names": list(item.unparsed_store_names),
                 "config": str(config_path),
             }

@@ -81,7 +81,7 @@ def case_cache_store_is_valid(
         and (path / ".zmetadata").is_file()
         and metadata is not None
         and metadata.get("verification_case_cache_schema") == CACHE_SCHEMA_VERSION
-        and metadata.get("case_cache_hash") == config.case_cache_hash
+        and metadata.get("case_cache_hash") in config.compatible_case_cache_hashes
         and metadata.get("model") == config.model_name
         and metadata.get("year") == year
         and metadata.get("month") == month
@@ -123,6 +123,36 @@ def case_cache_completion_is_valid(
             forecast_day=forecast_day,
         )
         for forecast_day in config.forecast_days
+    )
+
+
+def _write_completion_marker(
+    directory: Path,
+    config: VerificationConfig,
+    *,
+    year: int,
+    month: int,
+    repository_root: Path | None,
+) -> None:
+    """Mark a complete configured cache partition after all stores validate."""
+    partition = f"{year:04d}-{month:02d}"
+    expected = [f"forecast_day_{day:03d}.zarr" for day in config.forecast_days]
+    write_json_atomic(
+        {
+            "status": "complete",
+            "model": config.model_name,
+            "year": year,
+            "month": month,
+            "partition": partition,
+            "case_cache_hash": config.case_cache_hash,
+            "compatible_store_hashes": sorted(config.compatible_case_cache_hashes),
+            "git_commit": git_commit(repository_root or Path.cwd()),
+            "creation_timestamp": now_utc(),
+            "forecast_days": list(config.forecast_days),
+            "expected_stores": expected,
+            "zarr_format": 2,
+        },
+        directory / "completion.json",
     )
 
 
@@ -311,9 +341,15 @@ def compute_case_cache_partition(
     progress_path = directory / "progress.json"
     if progress_path.is_file():
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
-        if progress.get("case_cache_hash") != config.case_cache_hash:
+        progress_hash = progress.get("case_cache_hash")
+        if progress_hash not in config.compatible_case_cache_hashes:
             raise RuntimeError(
                 "Existing case-cache partition has a different scientific cache hash; use --overwrite"
+            )
+        if progress_hash != config.case_cache_hash:
+            print(
+                f"{partition}: adopting compatible committed case-cache stores from a prior lead range",
+                flush=True,
             )
     else:
         write_json_atomic(
@@ -327,6 +363,31 @@ def compute_case_cache_partition(
             },
             progress_path,
         )
+
+    # Lead stores are independent and atomically committed. When a prior job
+    # failed only because it requested an unavailable final lead, all newly
+    # configured leads may already be present. Complete the status marker
+    # directly: this avoids reopening raw forecasts or repeating any compute.
+    requested_stores_ready = all(
+        case_cache_store_is_valid(
+            case_cache_lead_path(config, year, month, forecast_day),
+            config,
+            year=year,
+            month=month,
+            forecast_day=forecast_day,
+        )
+        for forecast_day in days
+    )
+    if requested_stores_ready:
+        if set(days) == set(config.forecast_days):
+            _write_completion_marker(
+                directory,
+                config,
+                year=year,
+                month=month,
+                repository_root=repository_root,
+            )
+        return CaseCacheResult(directory, False, days)
 
     from .models import get_model_adapter
 
@@ -358,22 +419,12 @@ def compute_case_cache_partition(
 
     full_partition = set(days) == set(config.forecast_days)
     if full_partition:
-        expected = [f"forecast_day_{day:03d}.zarr" for day in config.forecast_days]
-        write_json_atomic(
-            {
-                "status": "complete",
-                "model": config.model_name,
-                "year": year,
-                "month": month,
-                "partition": partition,
-                "case_cache_hash": config.case_cache_hash,
-                "git_commit": git_commit(repository_root or Path.cwd()),
-                "creation_timestamp": now_utc(),
-                "forecast_days": list(config.forecast_days),
-                "expected_stores": expected,
-                "zarr_format": 2,
-            },
-            directory / "completion.json",
+        _write_completion_marker(
+            directory,
+            config,
+            year=year,
+            month=month,
+            repository_root=repository_root,
         )
     else:
         write_json_atomic(
