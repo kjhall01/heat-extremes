@@ -8,6 +8,7 @@ import xarray as xr
 import yaml
 
 from heatextremes.verification.config import load_config
+from heatextremes.verification.case_cache import compute_case_cache_partition
 from heatextremes.verification.models import get_model_adapter
 
 
@@ -114,6 +115,13 @@ def test_standard_raw_adapter_builds_one_canonical_lead_without_compact_output(t
         assert lead.interval_quantiles is not None
     finally:
         adapter.close_partition(opened)
+
+    # Onset construction can retain the previous lead as an incidental scalar
+    # coordinate. Ensure the cache writer normalizes it before combining the
+    # hot-day and onset probability fields.
+    cached = compute_case_cache_partition(config, 2022, 6, forecast_days=[1], repository_root=tmp_path)
+    assert not cached.skipped
+    assert (cached.partition_directory / "forecast_day_001.zarr").is_dir()
 
     deterministic_source = tmp_path / "forecasts_deterministic"
     deterministic_source.mkdir()

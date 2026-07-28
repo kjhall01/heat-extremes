@@ -138,22 +138,57 @@ def _cache_chunks(config: VerificationConfig, dataset: xr.Dataset) -> dict[str, 
     return chunks
 
 
+def _without_scalar_forecast_day(values: xr.DataArray) -> xr.DataArray:
+    """Remove a source scalar lead label before combining canonical fields.
+
+    Event-onset construction references both the previous and target lead. A
+    source adapter may therefore leave a scalar ``forecast_day`` coordinate
+    from the previous-day operand even though the returned array has no lead
+    dimension. The cache is already one store per target lead, so replace all
+    such incidental scalar labels with the explicit target label below.
+    """
+    if "forecast_day" in values.coords and "forecast_day" not in values.dims:
+        return values.reset_coords("forecast_day", drop=True)
+    return values
+
+
+def _without_source_auxiliary_coordinates(values: xr.DataArray) -> xr.DataArray:
+    """Keep only dimension coordinates when combining case fields.
+
+    Forecast temperature and each event field may carry a different lazy
+    ``valid_date`` auxiliary coordinate after onset construction. The case
+    cache writes the authoritative target-lead valid-date coordinate once, so
+    retaining the source-specific copies would make xarray reject an otherwise
+    compatible Dataset merge.
+    """
+    removable = [name for name in values.coords if name not in values.dims]
+    return values.drop_vars(removable) if removable else values
+
+
 def _canonical_cache_dataset(lead, config: VerificationConfig, *, year: int, month: int) -> xr.Dataset:
     """Serialize the canonical lead fields needed by future metric jobs only."""
     probabilities = xr.concat(
-        [lead.event_probabilities[event].astype(np.float32) for event in CANONICAL_EVENTS],
+        [
+            _without_source_auxiliary_coordinates(lead.event_probabilities[event]).astype(np.float32)
+            for event in CANONICAL_EVENTS
+        ],
         dim=xr.IndexVariable("event", list(CANONICAL_EVENTS)),
     ).rename("forecast_probability")
     observed = xr.concat(
-        [lead.observed_events[event].astype(np.float32) for event in CANONICAL_EVENTS],
+        [
+            _without_source_auxiliary_coordinates(lead.observed_events[event]).astype(np.float32)
+            for event in CANONICAL_EVENTS
+        ],
         dim=xr.IndexVariable("event", list(CANONICAL_EVENTS)),
     )
+    forecast_temperature = _without_source_auxiliary_coordinates(lead.ensemble_mean_temperature)
+    observation_temperature = _without_source_auxiliary_coordinates(lead.observation_temperature)
     valid_event = probabilities.notnull() & observed.notnull()
-    valid_temperature = lead.ensemble_mean_temperature.notnull() & lead.observation_temperature.notnull()
+    valid_temperature = forecast_temperature.notnull() & observation_temperature.notnull()
     dataset = xr.Dataset(
         {
-            "forecast_temperature": lead.ensemble_mean_temperature.where(valid_temperature).astype(np.float32),
-            "observation_temperature": lead.observation_temperature.where(valid_temperature).astype(np.float32),
+            "forecast_temperature": forecast_temperature.where(valid_temperature).astype(np.float32),
+            "observation_temperature": observation_temperature.where(valid_temperature).astype(np.float32),
             "temperature_case_valid": valid_temperature.astype(bool),
             "forecast_probability": probabilities.where(valid_event).astype(np.float32),
             "observed_event": observed.where(valid_event, 0.0).astype(np.uint8),
@@ -161,12 +196,14 @@ def _canonical_cache_dataset(lead, config: VerificationConfig, *, year: int, mon
         }
     )
     if lead.interval_quantiles is not None:
-        dataset["forecast_temperature_quantile"] = lead.interval_quantiles.astype(np.float32)
+        dataset["forecast_temperature_quantile"] = _without_source_auxiliary_coordinates(
+            lead.interval_quantiles
+        ).astype(np.float32)
     if lead.valid_date is not None:
         # Valid date can vary by longitude for a local-solar-day product, so
         # preserve its compact native coordinate dimensions rather than
         # broadcasting a datetime value over latitude.
-        dataset = dataset.assign_coords(valid_date=lead.valid_date)
+        dataset = dataset.assign_coords(valid_date=_without_scalar_forecast_day(lead.valid_date))
     dataset = dataset.assign_coords(forecast_day=np.int16(lead.forecast_day))
     dataset.attrs = {
         "verification_case_cache_schema": CACHE_SCHEMA_VERSION,
