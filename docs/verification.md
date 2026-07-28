@@ -346,6 +346,13 @@ python scripts/verification/open_reforecast_case_cache.py \
   --model-name aurora_e2s
 ```
 
+For `--model-name aifs_ens_v2`, the same utility instead opens the legacy
+compact monthly intermediates used by `notebooks/03_full_aifs_heat_verification.ipynb`.
+It lazily matches ERA5 temperature/event fields by `valid_date` and renames
+the result to the modern canonical schema (`forecast_temperature`,
+`observation_temperature`, `forecast_probability`, `observed_event`, and
+validity masks). All other model names use modern canonical case-cache stores.
+
 The reader discovers expected month/lead coverage from
 `inventory/reforecast_inventory.json` when available.  It can represent a
 missing lead only when another lead exists for that month; a wholly missing

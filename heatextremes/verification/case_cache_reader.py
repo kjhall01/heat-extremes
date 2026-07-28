@@ -1,10 +1,8 @@
-"""Lazy, gap-aware access to model case-cache Zarr stores.
+"""Lazy, gap-aware access to legacy and modern model intermediate Zarr stores.
 
-The reforecast workflow writes one independent Zarr store per model, month,
-and forecast day.  This module makes that layout convenient to analyse as one
-lazy :class:`xarray.Dataset` without hiding unfinished work: absent lead
-stores in an otherwise available month are represented by all-NaN slices and
-reported when the dataset is opened.
+``aifs_ens_v2`` uses the existing compact monthly stores consumed by the
+``03_full_aifs_heat_verification.ipynb`` notebook.  Other models use the
+modern, canonical case-cache layout written by the reforecast workflow.
 """
 
 from __future__ import annotations
@@ -18,13 +16,25 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from .alignment import map_to_forecast_grid, match_observation_by_valid_date
+from .events import CANONICAL_EVENTS
+
 
 DEFAULT_RESULTS_ROOT = Path(
     "/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results"
 )
+DEFAULT_AIFS_MONTHLY_ROOT = Path("/net/monsoon/kylehall/ERA5/heat_extremes_aifs_ens_v2/monthly")
+DEFAULT_ERA5_DAILY_TEMPERATURE_STORE = Path(
+    "/net/monsoon/kylehall/ERA5/heat_extremes_climatology/daily/t2m_daily_mean.zarr"
+)
+DEFAULT_ERA5_HAZARD_STORE = Path(
+    "/net/monsoon/kylehall/ERA5/heat_extremes_climatology/hazards/t2m_daily_mean_q95_hazards.zarr"
+)
+LEGACY_AIFS_MODEL_NAMES = frozenset({"aifs_ens_v2", "aifs-ens-v2"})
 SUPPORTED_FORECAST_DAYS = tuple(range(15))
 _PARTITION_PATTERN = re.compile(r"(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])")
 _STORE_PATTERN = re.compile(r"forecast_day_(?P<forecast_day>\d{3})\.zarr")
+_AIFS_MONTHLY_STORE_PATTERN = re.compile(r"aifs_ens_v2_heat_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.zarr")
 
 
 @dataclass(frozen=True)
@@ -64,14 +74,77 @@ class CaseCacheAvailability:
         return "\n".join(lines)
 
 
+def open_model_intermediates(
+    model_name: str,
+    *,
+    results_root: str | Path = DEFAULT_RESULTS_ROOT,
+    monthly_root: str | Path = DEFAULT_AIFS_MONTHLY_ROOT,
+    era5_daily_temperature_store: str | Path = DEFAULT_ERA5_DAILY_TEMPERATURE_STORE,
+    era5_hazard_store: str | Path = DEFAULT_ERA5_HAZARD_STORE,
+    forecast_days: Sequence[int] | None = None,
+    chunks: Mapping[str, int] | str = "auto",
+) -> xr.Dataset:
+    """Open a model's intermediate stores lazily and fill missing leads with NaNs.
+
+    ``aifs_ens_v2`` (and the hyphenated alias) opens the legacy compact
+    monthly intermediates used by ``03_full_aifs_heat_verification.ipynb``.
+    Every other model opens its modern canonical case cache.
+
+    Both routes return the same canonical fields: ``forecast_temperature``,
+    ``observation_temperature``, ``temperature_case_valid``,
+    ``forecast_probability``, ``observed_event``, and ``event_case_valid``.
+    The legacy route matches ERA5 temperature and event fields lazily using
+    the compact store's ``valid_date`` coordinate.  ``results_root`` is used
+    only by modern case-cache models; the monthly and ERA5 paths are used only
+    by AIFS ENS v2.
+    """
+    if model_name.casefold() in LEGACY_AIFS_MODEL_NAMES:
+        return _open_legacy_aifs_monthly_intermediates(
+            model_name,
+            monthly_root=monthly_root,
+            era5_daily_temperature_store=era5_daily_temperature_store,
+            era5_hazard_store=era5_hazard_store,
+            forecast_days=forecast_days,
+            chunks=chunks,
+        )
+    return _open_modern_case_cache(
+        model_name,
+        results_root=results_root,
+        forecast_days=forecast_days,
+        chunks=chunks,
+    )
+
+
 def open_model_case_cache(
     model_name: str,
     *,
     results_root: str | Path = DEFAULT_RESULTS_ROOT,
+    monthly_root: str | Path = DEFAULT_AIFS_MONTHLY_ROOT,
+    era5_daily_temperature_store: str | Path = DEFAULT_ERA5_DAILY_TEMPERATURE_STORE,
+    era5_hazard_store: str | Path = DEFAULT_ERA5_HAZARD_STORE,
     forecast_days: Sequence[int] | None = None,
     chunks: Mapping[str, int] | str = "auto",
 ) -> xr.Dataset:
-    """Open a model's case-cache stores lazily and fill missing leads with NaNs.
+    """Backward-compatible name for :func:`open_model_intermediates`."""
+    return open_model_intermediates(
+        model_name,
+        results_root=results_root,
+        monthly_root=monthly_root,
+        era5_daily_temperature_store=era5_daily_temperature_store,
+        era5_hazard_store=era5_hazard_store,
+        forecast_days=forecast_days,
+        chunks=chunks,
+    )
+
+
+def _open_modern_case_cache(
+    model_name: str,
+    *,
+    results_root: str | Path,
+    forecast_days: Sequence[int] | None,
+    chunks: Mapping[str, int] | str,
+) -> xr.Dataset:
+    """Open a modern model's case-cache stores lazily and fill missing leads.
 
     The inventory manifest supplies expected months and forecast days when it
     exists.  Otherwise existing ``case_cache/YYYY-MM`` directories are used
@@ -80,26 +153,6 @@ def open_model_case_cache(
     A wholly absent expected month is reported but omitted because there is no
     trustworthy initialization coordinate from which to construct its shape.
 
-    Parameters
-    ----------
-    model_name:
-        Result-directory/model name, for example ``aurora_e2s``.
-    results_root:
-        Verification results root containing the model directory and optional
-        ``inventory/reforecast_inventory.json`` manifest.
-    forecast_days:
-        Override the discovered expected forecast days.  Values must be in the
-        supported 0--14 range.
-    chunks:
-        Passed to :func:`xarray.open_zarr`; the default ``"auto"`` produces
-        Dask-backed arrays and therefore does not read data values on open.
-
-    Returns
-    -------
-    xarray.Dataset
-        Cases concatenated over ``forecast_day`` and their native time
-        dimension.  Coverage details are printed and also stored in dataset
-        attributes as JSON.
     """
     root = Path(results_root).expanduser()
     cache_root = root / model_name / "case_cache"
@@ -147,14 +200,186 @@ def open_model_case_cache(
     dataset = _concat_months(monthly_datasets)
     dataset.attrs = dict(dataset.attrs)
     dataset.attrs.update(
-        case_cache_reader_model=model_name,
-        case_cache_reader_results_root=str(root),
-        case_cache_reader_expected_forecast_days=json.dumps(list(expected_days)),
-        case_cache_reader_missing_partitions=json.dumps(list(missing_partitions)),
-        case_cache_reader_missing_slices=json.dumps(list(missing_slices)),
-        case_cache_reader_incomplete_slices=json.dumps(list(incomplete_slices)),
+        intermediate_reader_source="modern_case_cache",
+        intermediate_reader_model=model_name,
+        intermediate_reader_results_root=str(root),
+        intermediate_reader_expected_forecast_days=json.dumps(list(expected_days)),
+        intermediate_reader_missing_partitions=json.dumps(list(missing_partitions)),
+        intermediate_reader_missing_slices=json.dumps(list(missing_slices)),
+        intermediate_reader_incomplete_slices=json.dumps(list(incomplete_slices)),
     )
     return dataset
+
+
+def _open_legacy_aifs_monthly_intermediates(
+    model_name: str,
+    *,
+    monthly_root: str | Path,
+    era5_daily_temperature_store: str | Path,
+    era5_hazard_store: str | Path,
+    forecast_days: Sequence[int] | None,
+    chunks: Mapping[str, int] | str,
+) -> xr.Dataset:
+    """Open and canonically align the compact monthly AIFS stores lazily."""
+    root = Path(monthly_root).expanduser()
+    paths = sorted(root.glob("20??/aifs_ens_v2_heat_20????.zarr"))
+    if not paths:
+        raise FileNotFoundError(f"No AIFS ENS v2 monthly stores found beneath {root}")
+    expected_days = _expected_forecast_days(forecast_days, None)
+    missing_slices: list[tuple[str, int]] = []
+    monthly_datasets: list[xr.Dataset] = []
+
+    for path in paths:
+        match = _AIFS_MONTHLY_STORE_PATTERN.fullmatch(path.name)
+        if match is None:
+            continue
+        partition = f"{match.group('year')}-{match.group('month')}"
+        dataset = xr.open_zarr(path, consolidated=False, chunks=chunks)
+        if "forecast_day" not in dataset.dims:
+            raise ValueError(f"Legacy AIFS monthly store lacks forecast_day: {path}")
+        available_days = {int(day) for day in dataset["forecast_day"].values}
+        missing = tuple(day for day in expected_days if day not in available_days)
+        missing_slices.extend((partition, forecast_day) for forecast_day in missing)
+        # ``reindex`` is lazy for data arrays and fills absent compact-product
+        # leads with NaN, including their valid-date coordinate.
+        monthly_datasets.append(dataset.reindex(forecast_day=expected_days))
+
+    if not monthly_datasets:
+        raise FileNotFoundError(f"No matching AIFS ENS v2 monthly stores found beneath {root}")
+    compact = xr.concat(
+        monthly_datasets,
+        dim="time",
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+        join="override",
+        combine_attrs="override",
+    ).sortby("time")
+    compact = _canonicalize_dimensions(compact)
+    dataset = _canonicalize_legacy_aifs(
+        compact,
+        daily_temperature_store=era5_daily_temperature_store,
+        hazard_store=era5_hazard_store,
+        chunks=chunks,
+    )
+    print(
+        f"Legacy AIFS monthly report for {model_name}: {len(monthly_datasets)} month(s), "
+        f"{len(missing_slices)} missing lead slice(s).",
+        flush=True,
+    )
+    if missing_slices:
+        details = ", ".join(
+            f"{partition}/forecast_day_{forecast_day:03d}"
+            for partition, forecast_day in missing_slices
+        )
+        print("Filled with NaNs: " + details, flush=True)
+    dataset.attrs = dict(dataset.attrs)
+    dataset.attrs.update(
+        intermediate_reader_source="legacy_aifs_monthly",
+        intermediate_reader_model=model_name,
+        intermediate_reader_monthly_root=str(root),
+        intermediate_reader_era5_daily_temperature_store=str(era5_daily_temperature_store),
+        intermediate_reader_era5_hazard_store=str(era5_hazard_store),
+        intermediate_reader_expected_forecast_days=json.dumps(list(expected_days)),
+        intermediate_reader_missing_slices=json.dumps(list(missing_slices)),
+    )
+    return dataset
+
+
+def _canonicalize_legacy_aifs(
+    compact: xr.Dataset,
+    *,
+    daily_temperature_store: str | Path,
+    hazard_store: str | Path,
+    chunks: Mapping[str, int] | str,
+) -> xr.Dataset:
+    """Match legacy AIFS compact fields to the canonical case-cache schema."""
+    needed = {
+        "t2m_daily_mean_ensemble_mean",
+        "hot_day_q95_probability",
+        "heatwave_start_q95_2d_probability",
+        "heatwave_start_q95_3d_probability",
+    }
+    missing = sorted(needed - set(compact.data_vars))
+    if missing:
+        raise KeyError(f"Legacy AIFS monthly stores are missing required variables: {missing}")
+    if "valid_date" not in compact.coords:
+        raise KeyError("Legacy AIFS monthly stores are missing required valid_date coordinates")
+
+    forecast_temperature = compact["t2m_daily_mean_ensemble_mean"]
+    valid_date = compact["valid_date"]
+    daily_temperature = xr.open_zarr(
+        daily_temperature_store,
+        consolidated=True,
+        chunks=chunks,
+    )["t2m_daily_mean"]
+    mapped_temperature = map_to_forecast_grid(daily_temperature, forecast_temperature, method="linear")
+    observation_temperature = _match_with_missing_valid_dates(mapped_temperature, valid_date)
+
+    probability_names = {
+        "hot_day_q95": "hot_day_q95_probability",
+        "heatwave_start_q95_2d": "heatwave_start_q95_2d_probability",
+        "heatwave_start_q95_3d": "heatwave_start_q95_3d_probability",
+    }
+    probabilities = xr.concat(
+        [compact[probability_names[event]] for event in CANONICAL_EVENTS],
+        dim=xr.IndexVariable("event", list(CANONICAL_EVENTS)),
+    ).rename("forecast_probability")
+    hazards = xr.open_zarr(hazard_store, consolidated=True, chunks=chunks)
+    observed_events: list[xr.DataArray] = []
+    for event in CANONICAL_EVENTS:
+        if event not in hazards:
+            raise KeyError(f"ERA5 hazard store is missing required event variable: {event}")
+        mapped_hazard = map_to_forecast_grid(
+            hazards[event].astype(np.float32),
+            forecast_temperature,
+            method="nearest",
+        )
+        observed_events.append(_match_with_missing_valid_dates(mapped_hazard, valid_date))
+    observed_event = xr.concat(
+        observed_events,
+        dim=xr.IndexVariable("event", list(CANONICAL_EVENTS)),
+    )
+
+    temperature_case_valid = forecast_temperature.notnull() & observation_temperature.notnull()
+    event_case_valid = probabilities.notnull() & observed_event.notnull()
+    return xr.Dataset(
+        {
+            "forecast_temperature": forecast_temperature.where(temperature_case_valid).astype(np.float32),
+            "observation_temperature": observation_temperature.where(temperature_case_valid).astype(np.float32),
+            "temperature_case_valid": temperature_case_valid.astype(bool),
+            "forecast_probability": probabilities.where(event_case_valid).astype(np.float32),
+            "observed_event": observed_event.where(event_case_valid, 0.0).astype(np.uint8),
+            "event_case_valid": event_case_valid.astype(bool),
+        },
+        coords={"valid_date": valid_date},
+        attrs=dict(compact.attrs),
+    )
+
+
+def _match_with_missing_valid_dates(
+    observation: xr.DataArray,
+    valid_date: xr.DataArray,
+) -> xr.DataArray:
+    """Match ERA5 while retaining all-NaN output for missing legacy leads."""
+    valid = valid_date.notnull()
+    fallback_date = observation["time"].isel(time=0)
+    safe_valid_date = valid_date.where(valid, fallback_date)
+    return match_observation_by_valid_date(observation, safe_valid_date).where(valid)
+
+
+def _canonicalize_dimensions(data: xr.Dataset | xr.DataArray) -> xr.Dataset | xr.DataArray:
+    renames = {
+        "time": "initialization",
+        "lat": "latitude",
+        "lon": "longitude",
+    }
+    applicable = {
+        old: new
+        for old, new in renames.items()
+        if old in data.dims or old in data.coords or (isinstance(data, xr.Dataset) and old in data.data_vars)
+    }
+    return data.rename(applicable)
 
 
 def _manifest_expectations(

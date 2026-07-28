@@ -6,7 +6,10 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-from heatextremes.verification.case_cache_reader import open_model_case_cache
+from heatextremes.verification.case_cache_reader import (
+    open_model_case_cache,
+    open_model_intermediates,
+)
 
 
 def _write_case_store(path: Path, *, forecast_day: int, value: float) -> None:
@@ -69,3 +72,88 @@ def test_lazy_case_cache_reader_fills_missing_leads_and_reports_them(
     assert dataset.forecast_day.values.tolist() == [0, 1, 2]
     assert np.isnan(dataset["forecast_temperature"].sel(forecast_day=1).compute()).all()
     assert dataset["forecast_temperature"].sel(forecast_day=2).compute().item() == 282.0
+
+
+def test_aifs_ens_v2_uses_legacy_monthly_intermediates(tmp_path: Path, capsys) -> None:
+    monthly_root = tmp_path / "monthly"
+    store = monthly_root / "2022" / "aifs_ens_v2_heat_202206.zarr"
+    store.parent.mkdir(parents=True)
+    xr.Dataset(
+        {
+            "t2m_daily_mean_ensemble_mean": (
+                ("time", "forecast_day", "latitude", "longitude"),
+                np.asarray([[[[280.0]], [[282.0]]]], dtype=np.float32),
+            ),
+            "hot_day_q95_probability": (
+                ("time", "forecast_day", "latitude", "longitude"),
+                np.asarray([[[[0.2]], [[0.4]]]], dtype=np.float32),
+            ),
+            "heatwave_start_q95_2d_probability": (
+                ("time", "forecast_day", "latitude", "longitude"),
+                np.asarray([[[[0.1]], [[0.3]]]], dtype=np.float32),
+            ),
+            "heatwave_start_q95_3d_probability": (
+                ("time", "forecast_day", "latitude", "longitude"),
+                np.asarray([[[[0.05]], [[0.15]]]], dtype=np.float32),
+            ),
+        },
+        coords={
+            "time": [np.datetime64("2022-06-01")],
+            "forecast_day": [0, 2],
+            "latitude": [0.0],
+            "longitude": [0.0],
+            "valid_date": (
+                ("time", "forecast_day", "longitude"),
+                np.asarray([[["2022-06-01"], ["2022-06-02"]]], dtype="datetime64[ns]"),
+            ),
+        },
+    ).chunk({"time": 1}).to_zarr(store, mode="w", consolidated=False)
+    daily_store = tmp_path / "era5_daily.zarr"
+    xr.Dataset(
+        {"t2m_daily_mean": (("time", "latitude", "longitude"), np.asarray([[[281.0]], [[283.0]]]))},
+        coords={
+            "time": np.asarray(["2022-06-01", "2022-06-02"], dtype="datetime64[ns]"),
+            "latitude": [0.0],
+            "longitude": [0.0],
+        },
+    ).to_zarr(daily_store, mode="w", consolidated=True)
+    hazard_store = tmp_path / "era5_hazards.zarr"
+    xr.Dataset(
+        {
+            event: (("time", "latitude", "longitude"), np.asarray([[[0]], [[1]]], dtype=np.uint8))
+            for event in ("hot_day_q95", "heatwave_start_q95_2d", "heatwave_start_q95_3d")
+        },
+        coords={
+            "time": np.asarray(["2022-06-01", "2022-06-02"], dtype="datetime64[ns]"),
+            "latitude": [0.0],
+            "longitude": [0.0],
+        },
+    ).to_zarr(hazard_store, mode="w", consolidated=True)
+
+    dataset = open_model_intermediates(
+        "aifs_ens_v2",
+        monthly_root=monthly_root,
+        era5_daily_temperature_store=daily_store,
+        era5_hazard_store=hazard_store,
+        forecast_days=[0, 1, 2],
+    )
+
+    assert "Legacy AIFS monthly report" in capsys.readouterr().out
+    assert dataset.attrs["intermediate_reader_source"] == "legacy_aifs_monthly"
+    assert dataset["forecast_temperature"].chunks is not None
+    assert set(dataset.data_vars) == {
+        "forecast_temperature",
+        "observation_temperature",
+        "temperature_case_valid",
+        "forecast_probability",
+        "observed_event",
+        "event_case_valid",
+    }
+    np.testing.assert_array_equal(
+        dataset.initialization.values,
+        np.asarray(["2022-06-01"], dtype="datetime64[ns]"),
+    )
+    assert dataset.forecast_day.values.tolist() == [0, 1, 2]
+    assert np.isnan(dataset["forecast_temperature"].sel(forecast_day=1).compute()).all()
+    assert np.isnan(dataset["observation_temperature"].sel(forecast_day=1).compute()).all()
+    assert dataset["observation_temperature"].sel(forecast_day=2).compute().item() == 283.0
