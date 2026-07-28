@@ -104,6 +104,14 @@ def test_inventory_caps_long_raw_horizons_at_fifteen_forecast_days(tmp_path: Pat
 
     assert inventory[0].forecast_days == tuple(range(15))
 
+    shortened = inventory_reforecast_root(
+        root,
+        years=[2022],
+        months=[6],
+        max_forecast_day=12,
+    )
+    assert shortened[0].forecast_days == tuple(range(13))
+
 
 def test_metadata_registry_sets_deterministic_capability_and_excludes_gencast(tmp_path: Path) -> None:
     root = tmp_path / "reforecast"

@@ -18,6 +18,7 @@ _DATE_PATTERNS = (
     r"(?P<year>(?:19|20)\d{2})[-_](?P<month>0[1-9]|1[0-2])",
     r"(?P<year>(?:19|20)\d{2})(?P<month>0[1-9]|1[0-2])",
 )
+MAX_SUPPORTED_FORECAST_DAY = 14
 
 
 @dataclass(frozen=True)
@@ -60,10 +61,12 @@ def inventory_reforecast_root(
     *,
     years: Iterable[int],
     months: Iterable[int],
+    max_forecast_day: int = MAX_SUPPORTED_FORECAST_DAY,
 ) -> list[ReforecastModelInventory]:
     """Discover compatible model directories when no metadata registry is used."""
     if not root.is_dir():
         raise FileNotFoundError(f"Reforecast root does not exist or is not a directory: {root}")
+    max_forecast_day = _validate_max_forecast_day(max_forecast_day)
     wanted = {(int(year), int(month)) for year in years for month in months}
     found: list[ReforecastModelInventory] = []
     names: set[str] = set()
@@ -82,7 +85,8 @@ def inventory_reforecast_root(
                     ensemble=True,
                     source_temperature_variable="2t",
                     source_store_glob="init_*.zarr",
-                )
+                ),
+                max_forecast_day=max_forecast_day,
             )
         )
     return found
@@ -160,7 +164,21 @@ def available_local_solar_forecast_days(store: Path, source_temperature_variable
         dataset.close()
 
 
-def _with_available_forecast_days(inventory: ReforecastModelInventory) -> ReforecastModelInventory:
+def _validate_max_forecast_day(value: int) -> int:
+    """Validate the inclusive local-solar lead cap for an inventory run."""
+    value = int(value)
+    if not 0 <= value <= MAX_SUPPORTED_FORECAST_DAY:
+        raise ValueError(
+            f"max_forecast_day must be within 0 through {MAX_SUPPORTED_FORECAST_DAY}; got {value}"
+        )
+    return value
+
+
+def _with_available_forecast_days(
+    inventory: ReforecastModelInventory,
+    *,
+    max_forecast_day: int = MAX_SUPPORTED_FORECAST_DAY,
+) -> ReforecastModelInventory:
     """Use common valid leads across sampled selected months for one model.
 
     The selected lead list must be valid for every submitted model/month task.
@@ -168,6 +186,7 @@ def _with_available_forecast_days(inventory: ReforecastModelInventory) -> Refore
     because local-solar daily lead availability is determined by the store's
     forecast-step coordinate, not by its temperature values.
     """
+    max_forecast_day = _validate_max_forecast_day(max_forecast_day)
     stores_by_partition: dict[tuple[int, int], Path] = {}
     for store in sorted(inventory.directory.glob(inventory.source_store_glob)):
         partition = store_year_month(store)
@@ -184,9 +203,16 @@ def _with_available_forecast_days(inventory: ReforecastModelInventory) -> Refore
             errors.append(f"{partition[0]:04d}-{partition[1]:02d} metadata: {type(error).__name__}: {error}")
     if not available_sets:
         return replace(inventory, lead_inventory_errors=tuple(errors))
-    common = set.intersection(*available_sets)
+    common = {
+        forecast_day
+        for forecast_day in set.intersection(*available_sets)
+        if forecast_day <= max_forecast_day
+    }
     if not common:
-        errors.append("No common local-solar forecast days across sampled selected partitions")
+        errors.append(
+            "No common local-solar forecast days across sampled selected partitions "
+            f"within configured maximum {max_forecast_day}"
+        )
         return replace(inventory, lead_inventory_errors=tuple(errors))
     return replace(
         inventory,
@@ -225,6 +251,7 @@ def inventory_metadata_csv(
     root: Path,
     years: Iterable[int],
     months: Iterable[int],
+    max_forecast_day: int = MAX_SUPPORTED_FORECAST_DAY,
     excluded_model_names: Iterable[str] = ("gencast",),
     allowed_external_model_names: Iterable[str] = ("aifs-ens-v2",),
 ) -> tuple[list[ReforecastModelInventory], list[dict[str, str]]]:
@@ -243,6 +270,7 @@ def inventory_metadata_csv(
     if not root.is_dir():
         raise FileNotFoundError(f"Reforecast root does not exist or is not a directory: {root}")
     root = root.resolve()
+    max_forecast_day = _validate_max_forecast_day(max_forecast_day)
     wanted = {(int(year), int(month)) for year in years for month in months}
     excluded = {name.casefold() for name in excluded_model_names}
     allowed_external = {name.casefold() for name in allowed_external_model_names}
@@ -306,7 +334,8 @@ def inventory_metadata_csv(
                             source_store_glob=(
                                 "*.zarr" if display_name.casefold() in allowed_external else "init_*.zarr"
                             ),
-                        )
+                        ),
+                        max_forecast_day=max_forecast_day,
                     )
                 )
     return inventories, skipped

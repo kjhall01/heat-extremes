@@ -39,6 +39,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--years", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
     parser.add_argument("--months", type=int, nargs="+", default=[6, 7, 8, 9])
+    parser.add_argument(
+        "--max-forecast-day",
+        type=int,
+        choices=range(15),
+        default=14,
+        help="Inclusive zero-based local-solar lead cap (default: 14, i.e. days 0 through 14).",
+    )
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--config-directory", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
@@ -68,7 +75,11 @@ def main() -> None:
         raise FileNotFoundError(f"Region configuration is missing: {region_file}")
     metadata_csv = args.metadata_csv or (args.repository_root.resolve() / "Rossby Model Storage Locations - Sheet1.csv")
     inventories, skipped_models = inventory_metadata_csv(
-        metadata_csv.resolve(), root=root, years=args.years, months=args.months
+        metadata_csv.resolve(),
+        root=root,
+        years=args.years,
+        months=args.months,
+        max_forecast_day=args.max_forecast_day,
     )
     records: list[dict[str, object]] = []
     tasks: list[dict[str, object]] = []
@@ -119,6 +130,7 @@ def main() -> None:
         "results_root": str(results_root),
         "requested_years": sorted(set(args.years)),
         "requested_months": sorted(set(args.months)),
+        "requested_max_forecast_day": args.max_forecast_day,
         "metadata_csv": str(metadata_csv.resolve()),
         "models": records,
         "skipped_metadata_models": skipped_models,

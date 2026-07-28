@@ -15,6 +15,7 @@ Options:
   --result-root DIRECTORY       default: /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results
   --years "YYYY ..."            default: "2022 2023 2024 2025"
   --months "MM ..."             default: "6 7 8 9"
+  --max-forecast-day N          inclusive zero-based lead cap; default: 14
   --max-concurrent N            default: 1
   --regions "NAME ..."          score this region subset after case caching (default: all configured)
   --probability-bins "P ..."    reliability-bin edges (default: config values)
@@ -29,6 +30,7 @@ METADATA_CSV=""
 RESULT_ROOT="/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results"
 YEARS_TEXT="2022 2023 2024 2025"
 MONTHS_TEXT="6 7 8 9"
+MAX_FORECAST_DAY=14
 MAX_CONCURRENT=1
 REGIONS_TEXT=""
 PROBABILITY_BINS_TEXT=""
@@ -42,6 +44,7 @@ while (( $# )); do
         --result-root) RESULT_ROOT="$2"; shift 2 ;;
         --years) YEARS_TEXT="$2"; shift 2 ;;
         --months) MONTHS_TEXT="$2"; shift 2 ;;
+        --max-forecast-day) MAX_FORECAST_DAY="$2"; shift 2 ;;
         --max-concurrent) MAX_CONCURRENT="$2"; shift 2 ;;
         --regions) REGIONS_TEXT="$2"; shift 2 ;;
         --probability-bins) PROBABILITY_BINS_TEXT="$2"; shift 2 ;;
@@ -76,6 +79,7 @@ mkdir -p "${RESULT_ROOT}/logs" "${RESULT_ROOT}/inventory"
     --results-root "${RESULT_ROOT}" \
     --repository-root "${REPOSITORY_ROOT}" \
     --years ${YEARS_TEXT} --months ${MONTHS_TEXT} \
+    --max-forecast-day "${MAX_FORECAST_DAY}" \
     --manifest "${MANIFEST}" --config-directory "${CONFIG_DIRECTORY}"
 
 TASK_COUNT="$("${PYTHON}" -c 'import json, sys; print(json.load(open(sys.argv[1]))["task_count"])' "${MANIFEST}")"

@@ -115,6 +115,12 @@ cross-lead Dask graph.  A failed task has no `completion.json`; existing lead
 rows are resumed safely.  A valid completion marker causes a rerun to skip
 unless `--overwrite` is supplied.
 
+For a shorter scientifically chosen horizon, pass
+`--max-forecast-day N` to `submit_all_reforecasts_workflow.sh`. This is an
+inclusive zero-based cap: `--max-forecast-day 12` makes days 0 through 12 the
+configured complete set, including completion-marker and cache-reader
+expectations. It never permits days beyond the project's 0 through 14 cap.
+
 Every bounded lead reduction runs within `dask.diagnostics.ProgressBar()`, so
 the active task's `.out` log displays Dask progress while data are computing.
 The contexts do not use `.persist()` or join metrics across leads.
