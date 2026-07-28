@@ -22,4 +22,6 @@ dependencies:
   - gcsfs
   - pip
   - pip:
-      - -e ./heatextremes
+      # ``pyproject.toml`` is at the repository root, so install this
+      # repository—not the import-package subdirectory—in editable mode.
+      - -e .
