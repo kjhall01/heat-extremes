@@ -7,6 +7,10 @@ import xarray as xr
 import yaml
 
 from heatextremes.verification.aggregation import aggregate_result_directory
+from heatextremes.verification.case_cache import (
+    case_cache_completion_is_valid,
+    compute_case_cache_partition,
+)
 from heatextremes.verification.config import load_config
 from heatextremes.verification.io import completion_is_valid, find_table, read_table
 from heatextremes.verification.plotting import make_all_plots
@@ -68,7 +72,10 @@ def _write_synthetic_sources(tmp_path: Path) -> tuple[Path, Path, Path]:
 def test_small_partition_resumes_and_aggregates_without_raw_member_cube(tmp_path: Path) -> None:
     compact_path, daily_path, hazard_path = _write_synthetic_sources(tmp_path)
     regions_path = tmp_path / "regions.yaml"
-    regions_path.write_text("regions:\n  global: {}\n", encoding="utf-8")
+    regions_path.write_text(
+        "regions:\n  global: {}\n  northern: {latitude: [0.0, 90.0]}\n",
+        encoding="utf-8",
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
@@ -107,7 +114,14 @@ def test_small_partition_resumes_and_aggregates_without_raw_member_cube(tmp_path
         encoding="utf-8",
     )
     config = load_config(config_path)
-    first = compute_partition(config, 2022, 6, repository_root=tmp_path)
+    cached = compute_case_cache_partition(config, 2022, 6, repository_root=tmp_path)
+    assert not cached.skipped
+    assert case_cache_completion_is_valid(cached.partition_directory, config, year=2022, month=6)
+    assert (cached.partition_directory / "forecast_day_000.zarr").is_dir()
+    cached_again = compute_case_cache_partition(config, 2022, 6, repository_root=tmp_path)
+    assert cached_again.skipped
+
+    first = compute_partition(config, 2022, 6, repository_root=tmp_path, input_source="case_cache")
     assert not first.skipped
     assert completion_is_valid(first.partition_directory)
     assert (first.partition_directory / "maps.nc").is_file()
@@ -124,6 +138,32 @@ def test_small_partition_resumes_and_aggregates_without_raw_member_cube(tmp_path
     assert discovery.missing == ()
     deterministic = read_table(find_table(aggregate_directory, "deterministic_by_lead_region"))
     assert np.isclose(deterministic[deterministic.metric.eq("bias")]["value"].iloc[0], 1.0)
+    assert set(deterministic["region"]) == {"global", "northern"}
+    probability = read_table(find_table(aggregate_directory, "probability_by_lead_region"))
+    assert {"pod", "far"}.issubset(set(probability["metric"]))
     figure_directory = config.model_result_dir / "figures"
     make_all_plots([config.model_result_dir], figure_directory, reliability_forecast_days=[0])
     assert (figure_directory / "rmse_by_lead_global.png").is_file()
+
+    # A revised decision cutoff changes only derived metric products.  The
+    # expensive source/cache product remains valid and is not overwritten.
+    revised = load_config(
+        config_path,
+        overrides={"metrics": {"probability_decision_thresholds": [0.25]}},
+    )
+    assert revised.case_cache_hash == config.case_cache_hash
+    rederived = compute_partition(
+        revised,
+        2022,
+        6,
+        regions=["global"],
+        overwrite=True,
+        repository_root=tmp_path,
+        input_source="case_cache",
+    )
+    assert not rederived.skipped
+    assert case_cache_completion_is_valid(cached.partition_directory, revised, year=2022, month=6)
+    revised_probability = read_table(find_table(rederived.partition_directory, "probability"))
+    assert set(revised_probability.loc[revised_probability.metric.eq("pod"), "decision_threshold"]) == {
+        0.25
+    }

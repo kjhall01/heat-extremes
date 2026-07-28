@@ -62,8 +62,24 @@ chunking:
     latitude: 180
     longitude: 180
 
+case_cache:
+  # One restartable, consolidated Zarr v2 store is committed per month/lead.
+  # These canonical cases permit later regional and decision-threshold choices
+  # without reopening compact AIFS or ERA5 source products.
+  chunks:
+    initialization: 1
+    latitude: 180
+    longitude: 180
+    event: 3
+    quantile: 8
+  read_chunks:
+    initialization: 1
+    latitude: 180
+    longitude: 180
+
 metrics:
   probability_bins: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  probability_decision_thresholds: [0.5]
   interval_levels: [0.5, 0.8, 0.9, 0.95]
 
 regions:

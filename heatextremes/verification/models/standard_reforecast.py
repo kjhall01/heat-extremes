@@ -18,7 +18,7 @@ import xarray as xr
 
 from ..alignment import assert_exact_case_alignment, map_to_forecast_grid, match_observation_by_valid_date
 from ..config import VerificationConfig
-from .aifs import CANONICAL_EVENTS
+from ..events import CANONICAL_EVENTS
 from .base import CanonicalLead, ModelAdapter, ModelCapabilities
 
 
@@ -244,6 +244,7 @@ class StandardReforecastAdapter(ModelAdapter):
             event_probabilities=probabilities,
             observed_events=observed_events,
             interval_quantiles=interval_quantiles,
+            valid_date=valid_date,
         )
 
     def close_partition(self, opened: _RawReforecastPartition) -> None:

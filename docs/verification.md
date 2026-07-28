@@ -9,9 +9,11 @@
   observed-event fields;
 - `alignment.py` is the vectorized valid-date lookup from the verified heat
   notebooks; it does not stack forecast cases or lose a MultiIndex;
-- metric modules produce additive sufficient statistics, rather than a large
-  case-wise verification cube;
-- `runner.py` computes one monthly partition and one forecast day at a time;
+- `case_cache.py` writes restartable canonical local-solar verification cases
+  as consolidated Zarr v2 stores, one month/lead at a time;
+- metric modules derive additive sufficient statistics from those cases;
+- `runner.py` computes one monthly partition and one forecast day at a time,
+  from either a source adapter or the case cache;
 - `aggregation.py` combines partial numerators and denominators exactly;
 - `plotting.py` reads aggregate files only.  It never imports an adapter or
   opens raw forecast/ERA5 stores.
@@ -24,10 +26,11 @@ model has `ensemble: false`; interval metrics then explicitly receive an
 
 `standard_reforecast_raw` is a second adapter for standard raw directories
 such as `forecasts_<model>/init_*.zarr`. It reuses the verified local-solar
-daily-mean and q95/onset definitions directly from raw member temperatures,
-but never writes a reconstructed forecast, matched-ERA5 cube, or
-member-temperature cube. Only the current lead's quantities are reduced into
-verification sufficient statistics.
+daily-mean and q95/onset definitions directly from raw member temperatures.
+The preferred workflow commits a canonical case cache: daily ensemble-mean or
+deterministic temperature, q95-event probabilities, aligned ERA5 temperature
+and event flags, and selected interval quantiles. It does not save native
+forecast timesteps or member-temperature cubes.
 
 For a deterministic source, `ensemble: false` makes the daily-temperature
 forecast its own deterministic mean. Its q95 hot-day and event-onset
@@ -91,6 +94,12 @@ and probability-frequency-bias numerator.  Reliability bins store weighted
 and unweighted counts plus weighted sums of probability and observation;
 those values permit exact aggregation across months and models.
 
+POD and FAR use a configured probability decision cutoff, with a positive
+forecast defined as `P(event) >= cutoff`. Their partial rows retain weighted
+hits, misses, false alarms, and score numerators/denominators, so aggregation
+never averages monthly ratios. Deterministic models naturally use 0/1
+probabilities.
+
 Spatial products are unweighted initialization sums/counts at selected leads:
 temperature bias, squared error, hot-day Brier error, forecast probability,
 and observed-event frequency.  Aggregation derives the displayed fields from
@@ -114,6 +123,11 @@ The contexts do not use `.persist()` or join metrics across leads.
 verification_results/
   aifs_ens_v2/
     run_metadata.json
+    case_cache/
+      2022-06/
+        forecast_day_000.zarr               # canonical cases, consolidated Zarr v2
+        ...
+        completion.json
     partial/
       2022-06/
         deterministic.parquet                 # or .csv
@@ -131,10 +145,21 @@ verification_results/
       metadata.json
 ```
 
-Partial rows retain `numerator` and `denominator`.  In particular, the final
-RMSE is `sqrt(total_squared_error / total_weight)`, not an average of monthly
-RMSE values.  Output replacement/deletion is guarded: targets must be resolved
-children of the configured results root and that root itself is refused.
+Partial rows retain `numerator` and `denominator`. The canonical case cache
+permits a later metric pass with a new configured region set, reliability-bin
+definition, or probability decision cutoff without reopening raw model data.
+The final RMSE is `sqrt(total_squared_error / total_weight)`, not an average
+of monthly RMSE values. Output replacement/deletion is guarded: targets must
+be resolved children of the configured results root and that root itself is
+refused.
+
+Each `forecast_day_*.zarr` cache product has canonical fields
+`forecast_temperature`, `observation_temperature`, `forecast_probability`,
+`observed_event`, and validity masks. Event is an explicit coordinate with
+hot-day, 2-day-onset, and 3-day-onset values. Ensemble products also contain
+`forecast_temperature_quantile` when the adapter can supply the configured
+central-interval quantiles. Stores are consolidated Zarr **format 2** and are
+written to a temporary sibling directory before a same-filesystem rename.
 
 ## Dry run and smoke test
 
@@ -144,14 +169,22 @@ These commands are safe off-cluster; dry run does not open an input store.
 python scripts/verification/compute_verification_partition.py \
   --config configs/verification/aifs_ens_v2.yaml --year 2022 --month 6 --dry-run
 
-# On the cluster, one lead/region to check memory before the array:
+# On the cluster, build one cache lead to check memory before the array:
 python scripts/verification/compute_verification_partition.py \
   --config configs/verification/aifs_ens_v2.yaml --year 2022 --month 6 \
-  --forecast-days 0 --regions global --resume
+  --forecast-days 0 --stage case_cache --resume
+
+# Calculate selected metrics later from that cache, without raw forecast input:
+python scripts/verification/compute_verification_partition.py \
+  --config configs/verification/aifs_ens_v2.yaml --year 2022 --month 6 \
+  --forecast-days 0 --regions global --probability-bins 0 0.2 0.5 0.8 1 \
+  --decision-thresholds 0.2 0.5 \
+  --stage cached_metrics --resume
 ```
 
-`--regions`, `--forecast-days`, `--overwrite`, `--resume`, and `--dry-run` are
-explicit.  An aggregation can likewise filter `--years`, `--months`,
+`--regions`, `--forecast-days`, `--probability-bins`,
+`--decision-thresholds`, `--stage`, `--overwrite`, `--resume`, and `--dry-run`
+are explicit. An aggregation can likewise filter `--years`, `--months`,
 `--regions`, and `--forecast-days`.  By default it stops on missing expected
 partitions; `--allow-missing` writes a clearly marked aggregate of completed
 partitions for inspection.
@@ -265,8 +298,9 @@ name, for example
 `/net/monsoon/marchakitus/reforecast/forecasts_aurora_e2s/init_*.zarr`. It
 uses `Rossby Model Storage Locations - Sheet1.csv` as its authoritative model
 registry, scans only the registered directory/store names, writes its manifest
-and generated per-model YAML files under the results root, then submits one
-independent model/month task. The registry's `N Members` field selects
+and generated per-model YAML files under the results root, then submits two
+independent model/month arrays: canonical case cache, followed by cache-backed
+metrics. The registry's `N Members` field selects
 deterministic versus ensemble behavior; Gencast is explicitly excluded.
 Defaults select available 2022–2025 JJAS initializations:
 
@@ -276,7 +310,9 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
   --result-root /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results \
   --years "2022 2023 2024 2025" \
   --months "6 7 8 9" \
-  --max-concurrent 1
+  --max-concurrent 1 \
+  --probability-bins "0 0.2 0.5 0.8 1" \
+  --decision-thresholds "0.2 0.5"
 ```
 
 Use a replacement registry explicitly with `--metadata-csv /path/to/models.csv`.
@@ -292,7 +328,7 @@ provided example; use `--reforecast-root /net/monsoon/marchakitus/reforecasts`
 if the cluster directory is plural.
 
 Expected source/model failures are recorded in
-`<results_root>/<model>/failures/YYYY-MM.json`; their task exits cleanly so
+`<results_root>/<model>/failures/<stage>/YYYY-MM.json`; their task exits cleanly so
 other models and tolerant aggregation continue. The aggregation status is in
 `inventory/aggregation_status.json`, and aggregate-only all-model comparison
 figures are written to `_all_models/figures/`. Start with one simultaneous raw

@@ -61,7 +61,14 @@ def verify_partition_metadata(partitions: Iterable[Path]) -> dict[str, object]:
         seen.add(key)
         signature = {
             key: payload.get(key)
-            for key in ("model", "configuration_hash", "forecast_days", "probability_bins", "interval_levels")
+            for key in (
+                "model",
+                "configuration_hash",
+                "forecast_days",
+                "probability_bins",
+                "probability_decision_thresholds",
+                "interval_levels",
+            )
         }
         if baseline is None:
             baseline = signature
@@ -99,8 +106,16 @@ def aggregate_deterministic(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def aggregate_probability(frame: pd.DataFrame) -> pd.DataFrame:
-    frame = _with_default_columns(frame, {"subset": "all"})
-    keys = ["model", "region", "forecast_day", "subset", "event", "metric"]
+    frame = _with_default_columns(frame, {"subset": "all", "decision_threshold": np.nan})
+    keys = [
+        "model",
+        "region",
+        "forecast_day",
+        "subset",
+        "event",
+        "metric",
+        "decision_threshold",
+    ]
     result = _sum_grouped(
         frame,
         keys,
@@ -111,6 +126,14 @@ def aggregate_probability(frame: pd.DataFrame) -> pd.DataFrame:
             "unweighted_support",
             "event_weighted_support",
             "non_event_weighted_support",
+            "weighted_hits",
+            "weighted_misses",
+            "weighted_false_alarms",
+            "weighted_correct_negatives",
+            "unweighted_hits",
+            "unweighted_misses",
+            "unweighted_false_alarms",
+            "unweighted_correct_negatives",
         ],
     )
     result["value"] = result["numerator"] / result["denominator"]

@@ -1,6 +1,7 @@
 #!/bin/bash
 # Inventory standard reforecast directories, then submit independent
-# model/month tasks followed by tolerant all-model aggregation and plotting.
+# model/month case-cache tasks, cache-backed metric tasks, then tolerant
+# all-model aggregation and plotting.
 
 set -eo pipefail
 
@@ -15,6 +16,9 @@ Options:
   --years "YYYY ..."            default: "2022 2023 2024 2025"
   --months "MM ..."             default: "6 7 8 9"
   --max-concurrent N            default: 1
+  --regions "NAME ..."          score this region subset after case caching (default: all configured)
+  --probability-bins "P ..."    reliability-bin edges (default: config values)
+  --decision-thresholds "P ..." probability cutoffs for POD/FAR (default: config value, 0.5)
   --overwrite                   replace only configured partial result partitions
   --inventory-only              write/report inventory but do not submit jobs
 EOF
@@ -26,6 +30,9 @@ RESULT_ROOT="/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/ve
 YEARS_TEXT="2022 2023 2024 2025"
 MONTHS_TEXT="6 7 8 9"
 MAX_CONCURRENT=1
+REGIONS_TEXT=""
+PROBABILITY_BINS_TEXT=""
+DECISION_THRESHOLDS_TEXT=""
 OVERWRITE_VALUE=0
 INVENTORY_ONLY=0
 while (( $# )); do
@@ -36,6 +43,9 @@ while (( $# )); do
         --years) YEARS_TEXT="$2"; shift 2 ;;
         --months) MONTHS_TEXT="$2"; shift 2 ;;
         --max-concurrent) MAX_CONCURRENT="$2"; shift 2 ;;
+        --regions) REGIONS_TEXT="$2"; shift 2 ;;
+        --probability-bins) PROBABILITY_BINS_TEXT="$2"; shift 2 ;;
+        --decision-thresholds) DECISION_THRESHOLDS_TEXT="$2"; shift 2 ;;
         --overwrite) OVERWRITE_VALUE=1; shift ;;
         --inventory-only) INVENTORY_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -82,13 +92,17 @@ if (( MAX_CONCURRENT < 1 )); then
     exit 2
 fi
 
-EXPORT_ARGUMENT="--export=ALL,REPOSITORY_ROOT=${REPOSITORY_ROOT},REFORECAST_MANIFEST=${MANIFEST},HEAT_VERIFICATION_RESULTS_ROOT=${RESULT_ROOT},OVERWRITE=${OVERWRITE_VALUE}"
-compute_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --array="0-$((TASK_COUNT - 1))%${MAX_CONCURRENT}" \
-    --output="${RESULT_ROOT}/logs/reforecast_verify_%A_%a.out" --error="${RESULT_ROOT}/logs/reforecast_verify_%A_%a.err" \
+EXPORT_ARGUMENT="--export=ALL,REPOSITORY_ROOT=${REPOSITORY_ROOT},REFORECAST_MANIFEST=${MANIFEST},HEAT_VERIFICATION_RESULTS_ROOT=${RESULT_ROOT},OVERWRITE=${OVERWRITE_VALUE},VERIFICATION_REGIONS=${REGIONS_TEXT},VERIFICATION_PROBABILITY_BINS=${PROBABILITY_BINS_TEXT},VERIFICATION_DECISION_THRESHOLDS=${DECISION_THRESHOLDS_TEXT}"
+cache_job="$(sbatch --parsable "${EXPORT_ARGUMENT},VERIFICATION_STAGE=case_cache" --array="0-$((TASK_COUNT - 1))%${MAX_CONCURRENT}" \
+    --output="${RESULT_ROOT}/logs/reforecast_cache_%A_%a.out" --error="${RESULT_ROOT}/logs/reforecast_cache_%A_%a.err" \
+    "${SLURM_DIRECTORY}/submit_reforecast_model_task.sbatch")"
+metrics_job="$(sbatch --parsable "${EXPORT_ARGUMENT},VERIFICATION_STAGE=cached_metrics" --dependency="afterany:${cache_job}" \
+    --array="0-$((TASK_COUNT - 1))%${MAX_CONCURRENT}" \
+    --output="${RESULT_ROOT}/logs/reforecast_metrics_%A_%a.out" --error="${RESULT_ROOT}/logs/reforecast_metrics_%A_%a.err" \
     "${SLURM_DIRECTORY}/submit_reforecast_model_task.sbatch")"
 # afterany is deliberate: isolated task/model failures are recorded, while
 # successful model partitions still aggregate and plot.
-aggregate_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterany:${compute_job}" \
+aggregate_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterany:${metrics_job}" \
     --output="${RESULT_ROOT}/logs/reforecast_aggregate_%j.out" --error="${RESULT_ROOT}/logs/reforecast_aggregate_%j.err" \
     "${SLURM_DIRECTORY}/submit_reforecast_aggregation.sbatch")"
 plot_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterany:${aggregate_job}" \
@@ -96,7 +110,8 @@ plot_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterany:${aggr
     "${SLURM_DIRECTORY}/submit_reforecast_plotting.sbatch")"
 
 printf 'Inventory: %s (%s tasks)\n' "${MANIFEST}" "${TASK_COUNT}"
-printf 'Submitted reforecast compute array: %s\n' "${compute_job}"
-printf 'Submitted tolerant aggregation: %s (afterany:%s)\n' "${aggregate_job}" "${compute_job}"
+printf 'Submitted reforecast case-cache array: %s\n' "${cache_job}"
+printf 'Submitted cache-backed metric array: %s (afterany:%s)\n' "${metrics_job}" "${cache_job}"
+printf 'Submitted tolerant aggregation: %s (afterany:%s)\n' "${aggregate_job}" "${metrics_job}"
 printf 'Submitted aggregate-only all-model plotting: %s (afterany:%s)\n' "${plot_job}" "${aggregate_job}"
-printf 'Monitor: squeue -u "%s" -j %s,%s,%s\n' "${USER}" "${compute_job}" "${aggregate_job}" "${plot_job}"
+printf 'Monitor: squeue -u "%s" -j %s,%s,%s,%s\n' "${USER}" "${cache_job}" "${metrics_job}" "${aggregate_job}" "${plot_job}"

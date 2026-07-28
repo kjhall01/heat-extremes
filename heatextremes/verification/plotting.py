@@ -83,6 +83,36 @@ def plot_brier_scores(probability: pd.DataFrame, output_directory: Path) -> None
         _finish(figure, output_directory / f"{stem}.png")
 
 
+def plot_probability_decision_metrics(probability: pd.DataFrame, output_directory: Path) -> None:
+    """Plot POD/FAR by lead for each configured probability decision cutoff."""
+    source = probability[probability["metric"].isin(["pod", "far"])].copy()
+    if source.empty:
+        return
+    for (region, metric), regional in source.groupby(["region", "metric"], dropna=False):
+        figure, axis = plt.subplots(figsize=(8, 4.8))
+        for (model, event, threshold), values in regional.groupby(
+            ["model", "event", "decision_threshold"], dropna=False
+        ):
+            values = values.sort_values("forecast_day")
+            axis.plot(
+                values["forecast_day"],
+                values["value"],
+                marker="o",
+                label=f"{model} — {event}, p≥{threshold:g}",
+            )
+        axis.set(
+            xlabel="Forecast day",
+            ylabel=metric.upper(),
+            ylim=(0, 1),
+            title=f"{metric.upper()} by lead — {region}",
+        )
+        axis.grid(alpha=0.35)
+        axis.legend(fontsize="x-small")
+        stem = f"{metric}_by_lead_{region}"
+        _save_figure_data(regional, output_directory / "data", stem)
+        _finish(figure, output_directory / f"{stem}.png")
+
+
 def plot_probability_frequency(probability: pd.DataFrame, output_directory: Path) -> None:
     source = probability[probability["event"].eq("hot_day_q95")].copy()
     for region, regional in source.groupby("region", dropna=False):
@@ -283,6 +313,7 @@ def make_all_plots(
     for metric in ("rmse", "bias", "mae"):
         plot_temperature_metric(deterministic, metric=metric, output_directory=output_directory, regions=regions)
     plot_brier_scores(probability, output_directory)
+    plot_probability_decision_metrics(probability, output_directory)
     plot_probability_frequency(probability, output_directory)
     plot_reliability(reliability, output_directory, forecast_days=reliability_forecast_days)
     plot_interval_coverage(interval, output_directory)

@@ -10,14 +10,8 @@ import xarray as xr
 
 from ..alignment import assert_exact_case_alignment, map_to_forecast_grid, match_observation_by_valid_date
 from ..config import VerificationConfig
+from ..events import CANONICAL_EVENTS
 from .base import CanonicalLead, ModelAdapter, ModelCapabilities
-
-
-CANONICAL_EVENTS = (
-    "hot_day_q95",
-    "heatwave_start_q95_2d",
-    "heatwave_start_q95_3d",
-)
 
 
 @dataclass
@@ -175,6 +169,7 @@ class AIFSEnsV2Adapter(ModelAdapter):
             event_probabilities=probabilities,
             observed_events=observed_events,
             interval_quantiles=self._interval_quantiles(opened, forecast_day),
+            valid_date=valid_date,
         )
 
     def close_partition(self, opened: _AIFSPartition) -> None:

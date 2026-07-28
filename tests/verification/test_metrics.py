@@ -5,7 +5,10 @@ import xarray as xr
 
 from heatextremes.verification.deterministic import deterministic_temperature_statistics
 from heatextremes.verification.interval_coverage import interval_coverage_statistics
-from heatextremes.verification.probabilistic import probability_event_statistics
+from heatextremes.verification.probabilistic import (
+    probability_decision_statistics,
+    probability_event_statistics,
+)
 from heatextremes.verification.reliability import probability_reliability_statistics
 from heatextremes.verification.weighting import weighted_sufficient_statistics
 
@@ -64,6 +67,19 @@ def test_brier_and_probability_frequency_sufficient_statistics() -> None:
     assert brier["numerator"].item() == 1.0
     assert brier["denominator"].item() == 3.0
     assert np.isclose(frequency["numerator"].item(), 0.5)
+
+
+def test_probability_decision_statistics_store_exact_pod_and_far_totals() -> None:
+    probability = _field(np.array([[[0.0], [1.0]], [[1.0], [0.0]]]))
+    event = _field(np.array([[[0], [1]], [[0], [0]]], dtype=bool))
+    result = probability_decision_statistics(probability, event, [0.5]).compute()
+    pod = result.sel(metric="pod", decision_threshold=0.5)
+    far = result.sel(metric="far", decision_threshold=0.5)
+    # Weighted hits=.5, misses=0, and false alarms=1.
+    assert np.isclose(pod["numerator"].item(), 0.5)
+    assert np.isclose(pod["denominator"].item(), 0.5)
+    assert np.isclose(far["numerator"].item(), 1.0)
+    assert np.isclose(far["denominator"].item(), 1.5)
 
 
 def test_reliability_bins_store_additive_sums() -> None:

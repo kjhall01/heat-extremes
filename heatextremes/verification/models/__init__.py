@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .aifs import AIFSEnsV2Adapter
 from .base import CanonicalLead, ModelAdapter
+from .case_cache import CaseCacheAdapter
 from .standard_reforecast import StandardReforecastAdapter
 
 
@@ -17,10 +18,17 @@ def get_model_adapter(config) -> ModelAdapter:
     raise ValueError(f"Unsupported verification model adapter: {adapter}")
 
 
+def get_case_cache_adapter(config) -> ModelAdapter:
+    """Open canonical cache products rather than the model's raw source."""
+    return CaseCacheAdapter(config)
+
+
 __all__ = [
     "AIFSEnsV2Adapter",
+    "CaseCacheAdapter",
     "CanonicalLead",
     "ModelAdapter",
     "StandardReforecastAdapter",
     "get_model_adapter",
+    "get_case_cache_adapter",
 ]

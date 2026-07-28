@@ -54,6 +54,7 @@ class VerificationConfig:
     path: Path
     data: dict[str, Any]
     config_hash: str
+    case_cache_hash: str
 
     @property
     def model_name(self) -> str:
@@ -94,6 +95,11 @@ class VerificationConfig:
     @property
     def interval_levels(self) -> tuple[float, ...]:
         return tuple(float(value) for value in self.data["metrics"]["interval_levels"])
+
+    @property
+    def probability_decision_thresholds(self) -> tuple[float, ...]:
+        values = self.data["metrics"].get("probability_decision_thresholds", (0.5,))
+        return tuple(float(value) for value in values)
 
     @property
     def table_format(self) -> str:
@@ -171,6 +177,7 @@ def load_config(
     # compatibility hash so a new region cannot silently resume an old partial.
     canonical = json.dumps(
         {
+            "verification_metric_schema": 2,
             "config": data,
             "region_file_sha256": hashlib.sha256(region_path.read_bytes()).hexdigest(),
         },
@@ -178,10 +185,32 @@ def load_config(
         separators=(",", ":"),
         default=str,
     )
+    cache_signature = {
+        "case_cache_schema": 1,
+        "model": data["model"],
+        # The output root, region definitions, probability bins, and map
+        # selection do not change a canonical forecast/observation case.  By
+        # excluding them, users can make new regional/decision-threshold
+        # products from one durable case cache.
+        "paths": {
+            key: value
+            for key, value in data["paths"].items()
+            if key != "verification_results_root"
+        },
+        "variables": data.get("variables", {}),
+        "observations": data.get("observations", {}),
+        "events": data.get("events", {}),
+        "forecast_days": list(data["selection"]["forecast_days"]),
+        "interval_levels": list(data["metrics"]["interval_levels"]),
+    }
+    case_cache_hash = hashlib.sha256(
+        json.dumps(cache_signature, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
     return VerificationConfig(
         path=config_path,
         data=data,
         config_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        case_cache_hash=case_cache_hash,
     )
 
 
@@ -216,3 +245,8 @@ def _validate_config(data: Mapping[str, Any]) -> None:
     levels = [float(value) for value in data["metrics"]["interval_levels"]]
     if any(not 0.0 < level < 1.0 for level in levels):
         raise ValueError("metrics.interval_levels must be in the open interval (0, 1)")
+    decision_thresholds = [float(value) for value in data["metrics"].get("probability_decision_thresholds", [0.5])]
+    if not decision_thresholds or any(value < 0.0 or value > 1.0 for value in decision_thresholds):
+        raise ValueError("metrics.probability_decision_thresholds must be within [0, 1]")
+    if len(set(decision_thresholds)) != len(decision_thresholds):
+        raise ValueError("metrics.probability_decision_thresholds must be unique")

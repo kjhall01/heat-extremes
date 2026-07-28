@@ -11,11 +11,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+import dask
 from dask.diagnostics import ProgressBar
 
 from .config import VerificationConfig
 from .alignment import map_to_forecast_grid
 from .deterministic import deterministic_temperature_statistics
+from .events import CANONICAL_EVENTS
 from .interval_coverage import INTERVAL_SUBSETS, interval_coverage_statistics
 from .io import (
     assert_safe_result_path,
@@ -33,8 +35,7 @@ from .io import (
     write_table_atomic,
 )
 from .models import get_model_adapter
-from .models.aifs import CANONICAL_EVENTS
-from .probabilistic import probability_event_statistics
+from .probabilistic import probability_decision_statistics, probability_event_statistics
 from .regions import Region, load_regions, region_mask, select_regions
 from .reliability import probability_reliability_statistics
 
@@ -57,10 +58,18 @@ def dry_run_partition(
     *,
     regions: Sequence[str] | None = None,
     forecast_days: Sequence[int] | None = None,
+    input_source: str = "raw",
 ) -> dict[str, object]:
     """Resolve a partition plan without opening a data store."""
     config.assert_partition_selected(year, month)
-    adapter = get_model_adapter(config)
+    if input_source == "raw":
+        adapter = get_model_adapter(config)
+    elif input_source == "case_cache":
+        from .models import get_case_cache_adapter
+
+        adapter = get_case_cache_adapter(config)
+    else:
+        raise ValueError(f"Unsupported verification input source: {input_source}")
     configured_regions = select_regions(load_regions(config.region_file), list(regions) if regions else None)
     days = tuple(forecast_days) if forecast_days else config.forecast_days
     invalid = sorted(set(days) - set(config.forecast_days))
@@ -73,7 +82,16 @@ def dry_run_partition(
         "output_directory": str(partition_directory(config, year, month)),
         "forecast_days": list(days),
         "regions": list(configured_regions),
-        "interval_coverage": "configured quantiles" if adapter.capabilities.interval_quantiles else "unavailable from compact store",
+        "interval_coverage": (
+            "determined from case-cache lead products"
+            if input_source == "case_cache"
+            else (
+                "configured quantiles"
+                if adapter.capabilities.interval_quantiles
+                else "unavailable from compact store"
+            )
+        ),
+        "input_source": input_source,
     }
 
 
@@ -113,13 +131,39 @@ def _completion_configuration_hash(directory: Path) -> str | None:
         return None
 
 
+def _completion_matches_request(
+    directory: Path,
+    *,
+    configuration_hash: str,
+    forecast_days: Sequence[int],
+    regions: Mapping[str, Region],
+) -> bool:
+    """Return whether a completion marker describes this metric selection."""
+    try:
+        payload = json.loads((directory / "completion.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        payload.get("configuration_hash") == configuration_hash
+        and {int(value) for value in payload.get("forecast_days", ())} == set(forecast_days)
+        and set(payload.get("regions", ())) == set(regions)
+    )
+
+
 def _frame_from_statistics(
     dataset: xr.Dataset,
     *,
     model: str,
     partition: str,
 ) -> pd.DataFrame:
-    frame = dataset.compute().to_dataframe().reset_index()
+    """Turn an already-computed, compact statistics dataset into tidy rows.
+
+    Computation is deliberately performed once for all metric families in
+    :func:`_lead_statistics`.  Calling ``Dataset.compute`` here would submit
+    independent graphs and prevent Dask from sharing the bounded per-lead
+    forecast reads between regions and metrics.
+    """
+    frame = dataset.to_dataframe().reset_index()
     frame.insert(0, "model", model)
     frame.insert(1, "initialization_period", partition)
     return frame
@@ -213,23 +257,33 @@ def _lead_statistics(
     partition: str,
     regions: Mapping[str, Region],
     probability_bins: Sequence[float],
+    probability_decision_thresholds: Sequence[float],
     interval_levels: Sequence[float],
     interval_unavailable_reason: str | None = None,
     land_mask: xr.DataArray | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Compute all regional sufficient statistics for one lead only."""
+    include_spatial: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, xr.Dataset | None]:
+    """Compute all regional sufficient statistics for one bounded lead.
+
+    All regions and metric families are assembled into *one* Dask computation.
+    This lets Dask share raw forecast/observation reads among regional masks
+    without retaining a global forecast or matched-observation cube after the
+    reduction completes.
+    """
     deterministic_pieces: list[xr.Dataset] = []
     probability_pieces: list[xr.Dataset] = []
+    decision_pieces: list[xr.Dataset] = []
     reliability_pieces: list[xr.Dataset] = []
     interval_pieces: list[xr.Dataset] = []
 
-    for region_name, region in regions.items():
-        compatible_land_mask = (
-            map_to_forecast_grid(land_mask.astype(float), lead.ensemble_mean_temperature, method="nearest")
-            .astype(bool)
-            if land_mask is not None
-            else None
+    compatible_land_mask = (
+        map_to_forecast_grid(land_mask.astype(float), lead.ensemble_mean_temperature, method="nearest").astype(
+            bool
         )
+        if land_mask is not None
+        else None
+    )
+    for region_name, region in regions.items():
         mask = region_mask(lead.ensemble_mean_temperature, region, land_mask=compatible_land_mask)
         forecast = lead.ensemble_mean_temperature.where(mask)
         observed_temperature = lead.observation_temperature.where(mask)
@@ -246,6 +300,11 @@ def _lead_statistics(
                 probability_event_statistics(probability, observed_event).expand_dims(
                     region=[region_name], event=[event]
                 )
+            )
+            decision_pieces.append(
+                probability_decision_statistics(
+                    probability, observed_event, probability_decision_thresholds
+                ).expand_dims(region=[region_name], event=[event])
             )
             reliability_pieces.append(
                 probability_reliability_statistics(probability, observed_event, probability_bins).expand_dims(
@@ -265,8 +324,36 @@ def _lead_statistics(
                     ).expand_dims(region=[region_name])
                 )
 
+    deterministic_statistics = xr.combine_by_coords(deterministic_pieces, combine_attrs="override")
+    probability_statistics = xr.combine_by_coords(probability_pieces, combine_attrs="override")
+    decision_statistics = xr.combine_by_coords(decision_pieces, combine_attrs="override")
+    reliability_statistics = xr.combine_by_coords(reliability_pieces, combine_attrs="override")
+    interval_statistics = (
+        xr.combine_by_coords(interval_pieces, combine_attrs="override") if interval_pieces else None
+    )
+
+    # A single call is important: separate ``.compute()`` calls would cause
+    # repeated upstream reads for each metric family or region.  This graph is
+    # still bounded by one forecast day and is released by the caller before
+    # advancing to the next day.
+    computations: list[xr.Dataset] = [
+        deterministic_statistics,
+        probability_statistics,
+        reliability_statistics,
+        decision_statistics,
+    ]
+    interval_index: int | None = None
+    if interval_statistics is not None:
+        interval_index = len(computations)
+        computations.append(interval_statistics)
+    spatial_index: int | None = None
+    if include_spatial:
+        spatial_index = len(computations)
+        computations.append(_spatial_sufficient_statistics(lead))
+    computed = dask.compute(*computations)
+
     deterministic = _frame_from_statistics(
-        xr.combine_by_coords(deterministic_pieces, combine_attrs="override"),
+        computed[0],
         model=model,
         partition=partition,
     )
@@ -277,16 +364,27 @@ def _lead_statistics(
     deterministic["value"] = np.where(deterministic["metric"].eq("rmse"), np.sqrt(ratio), ratio)
 
     probability = _frame_from_statistics(
-        xr.combine_by_coords(probability_pieces, combine_attrs="override"),
+        computed[1],
         model=model,
         partition=partition,
     )
     probability["forecast_day"] = lead.forecast_day
     probability["subset"] = "all"
+    probability["decision_threshold"] = np.nan
     probability["value"] = probability["numerator"] / probability["denominator"]
 
+    decisions = _frame_from_statistics(
+        computed[3],
+        model=model,
+        partition=partition,
+    )
+    decisions["forecast_day"] = lead.forecast_day
+    decisions["subset"] = "all"
+    decisions["value"] = decisions["numerator"] / decisions["denominator"]
+    probability = pd.concat([probability, decisions], ignore_index=True, sort=False)
+
     reliability = _frame_from_statistics(
-        xr.combine_by_coords(reliability_pieces, combine_attrs="override"),
+        computed[2],
         model=model,
         partition=partition,
     )
@@ -300,9 +398,9 @@ def _lead_statistics(
         reliability["weighted_observation_sum"] / reliability["weighted_count"]
     )
 
-    if interval_pieces:
+    if interval_index is not None:
         interval = _frame_from_statistics(
-            xr.combine_by_coords(interval_pieces, combine_attrs="override"),
+            computed[interval_index],
             model=model,
             partition=partition,
         )
@@ -330,7 +428,8 @@ def _lead_statistics(
             levels=interval_levels,
             reason=reason,
         )
-    return deterministic, probability, interval, reliability
+    spatial = computed[spatial_index] if spatial_index is not None else None
+    return deterministic, probability, interval, reliability, spatial
 
 
 def _map_lead_completed(path: Path, forecast_day: int) -> bool:
@@ -399,10 +498,16 @@ def compute_partition(
     overwrite: bool = False,
     resume: bool = True,
     repository_root: Path | None = None,
+    input_source: str = "raw",
 ) -> ComputeResult:
     """Compute one JJAS month, checkpointing compact results after every lead."""
     config.assert_partition_selected(year, month)
     partition = f"{year:04d}-{month:02d}"
+    regions_to_score = select_regions(load_regions(config.region_file), list(regions) if regions else None)
+    days = tuple(int(day) for day in (forecast_days or config.forecast_days))
+    invalid = sorted(set(days) - set(config.forecast_days))
+    if invalid:
+        raise ValueError(f"Requested forecast days are not configured: {invalid}")
     directory = partition_directory(config, year, month)
     assert_safe_result_path(directory, config.result_root)
     if completion_is_valid(directory) and not overwrite:
@@ -412,7 +517,13 @@ def compute_partition(
                 f"Completed partition uses configuration hash {completed_hash}; "
                 "pass --overwrite to replace it with the current configuration"
             )
-        return ComputeResult(directory, True, tuple(config.forecast_days))
+        if _completion_matches_request(
+            directory,
+            configuration_hash=config.config_hash,
+            forecast_days=days,
+            regions=regions_to_score,
+        ):
+            return ComputeResult(directory, True, days)
     if directory.exists() and overwrite:
         print(f"Removing configured result partition before overwrite: {directory}", flush=True)
         remove_result_path(directory, config.result_root)
@@ -441,15 +552,17 @@ def compute_partition(
     _write_root_metadata(config, repository_root or Path.cwd())
 
     table_format = resolve_table_format(config.table_format)
-    regions_to_score = select_regions(load_regions(config.region_file), list(regions) if regions else None)
-    days = tuple(int(day) for day in (forecast_days or config.forecast_days))
-    invalid = sorted(set(days) - set(config.forecast_days))
-    if invalid:
-        raise ValueError(f"Requested forecast days are not configured: {invalid}")
 
     frames = {stem: _load_existing(directory, stem) for stem in ("deterministic", "probability", "interval_coverage", "probability_reliability")}
     map_path = directory / "maps.nc"
-    adapter = get_model_adapter(config)
+    if input_source == "raw":
+        adapter = get_model_adapter(config)
+    elif input_source == "case_cache":
+        from .models import get_case_cache_adapter
+
+        adapter = get_case_cache_adapter(config)
+    else:
+        raise ValueError(f"Unsupported verification input source: {input_source}")
     opened = adapter.open_partition(year, month)
     land_mask, land_mask_dataset = _open_optional_land_mask(config)
     try:
@@ -470,39 +583,26 @@ def compute_partition(
             # tailed log distinguishes active reduction from scheduler delay.
             with ProgressBar():
                 lead = adapter.lead(opened, forecast_day)
-                # Do not hold graphs for every region at once.  The raw
-                # reforecast adapter can be considerably larger than compact
-                # AIFS products, and the resulting pandas rows are tiny.
-                regional_results = []
-                for region_name, region in regions_to_score.items():
-                    print(
-                        f"{partition}: forecast day {forecast_day}, region {region_name}",
-                        flush=True,
-                    )
-                    regional_results.append(
-                        _lead_statistics(
-                            lead,
-                            model=config.model_name,
-                            partition=partition,
-                            regions={region_name: region},
-                            probability_bins=config.probability_bins,
-                            interval_levels=config.interval_levels,
-                            interval_unavailable_reason=(
-                                "deterministic model does not provide ensemble intervals"
-                                if not adapter.capabilities.ensemble
-                                else None
-                            ),
-                            land_mask=land_mask,
-                        )
-                    )
-                deterministic = pd.concat([item[0] for item in regional_results], ignore_index=True)
-                probability = pd.concat([item[1] for item in regional_results], ignore_index=True)
-                interval = pd.concat([item[2] for item in regional_results], ignore_index=True)
-                reliability = pd.concat([item[3] for item in regional_results], ignore_index=True)
-                map_statistic = (
-                    _spatial_sufficient_statistics(lead).compute()
-                    if forecast_day in config.map_forecast_days
-                    else None
+                print(
+                    f"{partition}: forecast day {forecast_day}, assembling all "
+                    f"{len(regions_to_score)} regional reductions in one shared graph",
+                    flush=True,
+                )
+                deterministic, probability, interval, reliability, map_statistic = _lead_statistics(
+                    lead,
+                    model=config.model_name,
+                    partition=partition,
+                    regions=regions_to_score,
+                    probability_bins=config.probability_bins,
+                    probability_decision_thresholds=config.probability_decision_thresholds,
+                    interval_levels=config.interval_levels,
+                    interval_unavailable_reason=(
+                        "deterministic model does not provide ensemble intervals"
+                        if not adapter.capabilities.ensemble
+                        else None
+                    ),
+                    land_mask=land_mask,
+                    include_spatial=forecast_day in config.map_forecast_days,
                 )
             for stem, new in (
                 ("deterministic", deterministic),
@@ -515,15 +615,15 @@ def compute_partition(
 
             if map_statistic is not None:
                 _upsert_map(map_path, map_statistic)
-            del lead, regional_results, deterministic, probability, interval, reliability
+            adapter.release_lead(opened)
+            del lead, deterministic, probability, interval, reliability, map_statistic
             gc.collect()
     finally:
         adapter.close_partition(opened)
         if land_mask_dataset is not None:
             land_mask_dataset.close()
 
-    all_regions = load_regions(config.region_file)
-    full_partition = set(days) == set(config.forecast_days) and set(regions_to_score) == set(all_regions)
+    full_partition = set(days) == set(config.forecast_days)
     if full_partition:
         include_maps = bool(config.map_forecast_days)
         expected = completed_output_names(directory, include_maps=include_maps)
@@ -538,7 +638,9 @@ def compute_partition(
                 "git_commit": git_commit(repository_root or Path.cwd()),
                 "creation_timestamp": now_utc(),
                 "forecast_days": list(config.forecast_days),
+                "regions": list(regions_to_score),
                 "probability_bins": list(config.probability_bins),
+                "probability_decision_thresholds": list(config.probability_decision_thresholds),
                 "interval_levels": list(config.interval_levels),
                 "expected_output_files": expected,
             },
@@ -554,7 +656,7 @@ def compute_partition(
                 "configuration_hash": config.config_hash,
                 "updated_at": now_utc(),
                 "completed_request": {"forecast_days": list(days), "regions": list(regions_to_score)},
-                "message": "Subset request completed; full configured partition remains resumable.",
+                "message": "Forecast-day subset completed; full configured forecast-day range remains resumable.",
             },
             progress_path,
         )

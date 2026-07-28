@@ -9,8 +9,10 @@ documented in [docs/verification.md](docs/verification.md).
 
 The default configuration uses the existing compact AIFS ENS v2 monthly heat
 products and verifies JJAS (June–September) initializations from 2022–2025.
-It writes only compact sufficient statistics, never reconstructed forecasts or
-matched ERA5 cubes.
+The legacy one-step command writes compact sufficient statistics. The preferred
+reforecast workflow first writes a restartable Zarr v2 case cache, then
+calculates compact metrics from that cache; this permits later region and
+probability-decision choices without reopening model stores.
 
 ```bash
 # Inspect one bounded partition without opening a Zarr store.
@@ -58,6 +60,13 @@ The default registry is `Rossby Model Storage Locations - Sheet1.csv`; it
 sets deterministic versus ensemble behavior, includes the pilot AIFS-ENS-v2
 source even though it lives outside the generic reforecast root, and explicitly
 excludes Gencast.
+
+The submitted chain is now `case cache → cache-backed metrics → aggregation →
+plots`. Each month/lead case store contains canonical local-solar daily
+temperature, event probability, aligned ERA5 temperature/event fields, and
+available interval quantiles—not native hourly fields or ensemble members.
+For a new region list or POD/FAR threshold, rebuild only the cache-backed
+metric stage; the costly source preprocessing cache is retained.
 
 Run the synthetic tests from a source checkout with:
 

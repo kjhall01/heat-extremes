@@ -35,6 +35,7 @@ class CanonicalLead:
     event_probabilities: Mapping[str, xr.DataArray]
     observed_events: Mapping[str, xr.DataArray]
     interval_quantiles: xr.DataArray | None = None
+    valid_date: xr.DataArray | None = None
 
 
 class ModelAdapter(ABC):
@@ -57,3 +58,11 @@ class ModelAdapter(ABC):
     @abstractmethod
     def close_partition(self, opened_partition) -> None:
         """Close source datasets and release file handles."""
+
+    def release_lead(self, opened_partition) -> None:
+        """Release an optional per-lead resource after bounded reduction.
+
+        Most source adapters keep one month-level store open and need no
+        action.  Cache adapters open one independent Zarr store per lead and
+        override this hook to avoid retaining unnecessary file handles.
+        """

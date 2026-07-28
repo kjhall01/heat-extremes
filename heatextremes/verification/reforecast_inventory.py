@@ -282,8 +282,21 @@ def raw_reforecast_config(
             "thresholds": {"latitude": 180, "longitude": 180},
             "observations": {"time": 31, "latitude": 180, "longitude": 180},
         },
+        "case_cache": {
+            # Each lead is an independent Zarr v2 store.  These chunks bound
+            # both the write graph and later cache-backed metric reductions.
+            "chunks": {
+                "initialization": 1,
+                "latitude": 180,
+                "longitude": 180,
+                "event": 3,
+                "quantile": 8,
+            },
+            "read_chunks": {"initialization": 1, "latitude": 180, "longitude": 180},
+        },
         "metrics": {
             "probability_bins": [round(value / 10, 1) for value in range(11)],
+            "probability_decision_thresholds": [0.5],
             "interval_levels": [0.5, 0.8, 0.9, 0.95],
         },
         "regions": {"file": str(region_file)},
