@@ -185,6 +185,13 @@ def _canonical_cache_dataset(lead, config: VerificationConfig, *, year: int, mon
             "Derived metric tables may be recomputed from this cache without opening raw model data."
         ),
     }
+    # Source Zarr stores can carry backend-specific encodings (notably the
+    # Zarr v3 ``serializer`` encoding).  These are source I/O instructions,
+    # not scientific metadata, and passing one through to an explicit Zarr v2
+    # output makes zarr reject the write.  Let this cache's own chunks/default
+    # v2 codec define every output array instead.
+    for variable in dataset.variables.values():
+        variable.encoding.clear()
     chunks = _cache_chunks(config, dataset)
     return dataset.chunk(chunks) if chunks else dataset
 
