@@ -133,6 +133,17 @@ def available_local_solar_forecast_days(store: Path, source_temperature_variable
         if source_temperature_variable not in dataset:
             raise KeyError(f"Missing source temperature variable {source_temperature_variable!r}")
         temperature = dataset[source_temperature_variable]
+        # Individual standard stores retain native ``lat``/``lon`` names;
+        # the production adapter normalizes them after opening a month. Apply
+        # the same harmless coordinate rename here before calling the verified
+        # local-solar function, which intentionally expects canonical names.
+        coordinate_renames = {
+            old: new
+            for old, new in (("lat", "latitude"), ("lon", "longitude"))
+            if old in temperature.dims or old in temperature.coords
+        }
+        if coordinate_renames:
+            temperature = temperature.rename(coordinate_renames)
         if "prediction_timedelta" not in temperature.dims:
             raise ValueError("Source temperature lacks prediction_timedelta")
         # The source coordinate defines the actual maximum; 366 days is only

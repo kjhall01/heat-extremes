@@ -48,15 +48,15 @@ def test_inventory_uses_common_local_solar_leads_from_store_metadata(tmp_path: P
         raw = xr.Dataset(
             {
                 "2t": (
-                    ("time", "prediction_timedelta", "latitude", "longitude"),
+                    ("time", "prediction_timedelta", "lat", "lon"),
                     np.full((1, step_count, 1, longitude.size), 300.0),
                 )
             },
             coords={
                 "time": [np.datetime64("2022-06-01T00")],
                 "prediction_timedelta": np.arange(step_count) * np.timedelta64(6, "h"),
-                "latitude": [0.0],
-                "longitude": longitude,
+                "lat": [0.0],
+                "lon": longitude,
             },
         )
         raw.to_zarr(path, mode="w", consolidated=True)
