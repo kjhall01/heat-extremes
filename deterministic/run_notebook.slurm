@@ -3,8 +3,9 @@
 #SBATCH --partition=general
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -47,11 +48,39 @@ mkdir -p logs
 #     environment, so anything passed via --export takes precedence). ---
 : "${TEST_YEAR_START:=2022}"
 : "${TEST_YEAR_END:=2022}"    # inclusive; set > TEST_YEAR_START for a multi-year run
-: "${REGION_BOUNDS:=global}"   # south,north,west,east (degrees); or "global" for the full grid
-: "${VARIABLE:=t_wb_2m_mean_6h}" # t2m_mean_6h, t2m_max_6h, t2m_min_6h, total_precipitation, or the
+
+# Region: pick ONE of REGION (a name) or REGION_BOUNDS (raw numbers) --
+# _build_notebook.py's Step 0 raises if both end up set. REGION has no
+# default of its own (stays empty unless you pass one via --export); when
+# it's empty, REGION_BOUNDS falls back to its own Delhi default below, same
+# as before this option existed. Set REGION instead (e.g.
+# `--export=ALL,REGION=west_africa`) and leave REGION_BOUNDS unset -- don't
+# set both.
+: "${REGION:=}"  # global, tropics, nh_extratropics, sh_extratropics, conus, europe,
+                 # east_asia, sea, south_asia, west_africa, east_africa, mena, lac
+                 # (see _build_notebook.py's REGIONS dict for the exact box each one is)
+if [ -z "$REGION" ]; then
+    : "${REGION_BOUNDS:=27.5,29.5,76.5,78.5}"   # south,north,west,east (degrees); or "global" for the full grid
+else
+    : "${REGION_BOUNDS:=}"   # keep empty when REGION is set -- empty is treated the same as unset
+fi
+export REGION
+
+: "${MODEL:=aifs_ens_mean}" # aifs_ens_mean (AIFS-ENS-v2, 26-member ensemble mean -- default),
+                            # aifs_single (AIFS-single-v2's own single deterministic run),
+                            # graphcast, or aurora (the two newer models -- see graphcast.py/
+                            # aurora.py for real-vs-assumed caveats, substantially more
+                            # unconfirmed than AIFS's own loaders). Restricts which VARIABLE
+                            # values are even valid (_build_notebook.py's model_variables dict):
+                            # neither graphcast nor aurora has 2m_dewpoint_temperature (no
+                            # wet-bulb variables for either), and aurora additionally has no
+                            # total_precipitation at all.
+
+: "${VARIABLE:=t2m_mean_6h}" # t2m_mean_6h, t2m_max_6h, t2m_min_6h, total_precipitation, or the
                              # wet-bulb-temperature equivalents t_wb_2m_mean_6h/t_wb_2m_max_6h/
                              # t_wb_2m_min_6h (Stull 2011 approximation from 2m_temperature +
-                             # 2m_dewpoint_temperature -- see wetbulb.py).
+                             # 2m_dewpoint_temperature -- see wetbulb.py). Not every value is
+                             # valid for every MODEL above -- see that setting's comment.
                              # Absolute (35 degC) applies to every temperature variable, including
                              # wet-bulb, but not total_precipitation. Relative (percentile) applies
                              # only to t2m_max_6h/t2m_min_6h/total_precipitation -- there's no
@@ -60,17 +89,36 @@ mkdir -p logs
 : "${RELATIVE_PERCENTILE:=0.95}" # 0.95, 0.99, or 0.999 -- only used when VARIABLE is
                                  # t2m_max_6h/t2m_min_6h/total_precipitation; ignored for
                                  # t2m_mean_6h and every t_wb_2m_*_6h wet-bulb variable
-export TEST_YEAR_START TEST_YEAR_END REGION_BOUNDS VARIABLE RELATIVE_PERCENTILE
+export TEST_YEAR_START TEST_YEAR_END REGION_BOUNDS MODEL VARIABLE RELATIVE_PERCENTILE
 
 # Dask cluster sizing -- kept in sync with --cpus-per-task/--mem above by
 # default (N_WORKERS defaults to the CPUs this job was granted), rather than
 # the notebook's own hardcoded fallback, which doesn't know what Slurm gave
 # it. Lower MEMORY_LIMIT is a *per-worker* cap; N_WORKERS * MEMORY_LIMIT
 # should stay comfortably under --mem above.
-: "${N_WORKERS:=${SLURM_CPUS_PER_TASK:=8}}"
+: "${N_WORKERS:=${SLURM_CPUS_PER_TASK:-6}}"
 : "${THREADS_PER_WORKER:=1}"
-: "${MEMORY_LIMIT:=32GiB}"
+: "${MEMORY_LIMIT:=8GiB}"
 export N_WORKERS THREADS_PER_WORKER MEMORY_LIMIT
+
+# /net/scratch, not the repo directory: per the tutorial, this is ephemeral
+# shared scratch space, available from any node -- appropriate both for the
+# executed-notebook output below AND for dask's own spill-to-disk directory
+# (LOCAL_DIRECTORY): when a worker approaches MEMORY_LIMIT it writes some of
+# its data to local_directory to free RAM, and dask's own default for that
+# is just the current working directory -- which, without this, would be
+# wherever this script's `cd "$SLURM_SUBMIT_DIR"` below points (typically a
+# small-quota home/project filesystem, not built for GBs of spill files).
+# Hit this for real: a global/multi-year run spilled enough to fill that
+# quota and crashed with "OSError: [Errno 28] No space left on device" from
+# zict's disk-write path. Giving dask an explicit, large scratch directory
+# instead avoids that -- see the LocalCluster(..., local_directory=...) in
+# _build_notebook.py's Step 0 cluster cell.
+SCRATCH_DIR="/net/scratch/${USER}/deterministic_verification"
+mkdir -p "$SCRATCH_DIR"
+LOCAL_DIRECTORY="${SCRATCH_DIR}/dask-worker-space_${SLURM_JOB_ID:-interactive}"
+mkdir -p "$LOCAL_DIRECTORY"
+export LOCAL_DIRECTORY
 
 cd "$SLURM_SUBMIT_DIR"
 
@@ -83,12 +131,6 @@ cd "$SLURM_SUBMIT_DIR"
 # file directly for those, not the notebook.
 python _build_notebook.py
 
-# /net/scratch, not the repo directory: per the tutorial, this is ephemeral
-# shared scratch space, available from any node -- appropriate for a job
-# output that you'll immediately want to inspect, then either discard or
-# copy somewhere persistent (e.g. /net/projects/...).
-SCRATCH_DIR="/net/scratch/${USER}/deterministic_verification"
-mkdir -p "$SCRATCH_DIR"
 OUTPUT_NOTEBOOK="${SCRATCH_DIR}/deterministic_verification_metrics_${SLURM_JOB_ID}.ipynb"
 
 # --ExecutePreprocessor.timeout=-1: don't let nbconvert kill a long-running

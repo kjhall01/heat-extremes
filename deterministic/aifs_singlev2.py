@@ -172,6 +172,117 @@ def open_aifs_ensv2_reference() -> xr.Dataset:
     )
 
 
+def open_aifs_ensv2(
+    start_year: int | None = None,
+    end_year: int | None = None,
+) -> xr.Dataset:
+    """Open the AIFS-ENS-v2 ensemble reforecast (26 members), year-filtered.
+
+    Adapted from `open_aifs_ensv2_reference` above the same way
+    `open_aifs_singlev2` adapts it for the deterministic store: adds
+    `start_year`/`end_year` filename-based filtering (same
+    `_init_year`/`_INIT_STORE_FILENAME` helpers used there) so a restricted
+    year range doesn't need opening all ~25 years of zarr metadata first.
+    Everything else -- glob pattern, `wanted` variables, chunking (including
+    the `"number"` ensemble-member chunk, unlike `open_aifs_singlev2`, which
+    drops it), renaming -- is unchanged from `open_aifs_ensv2_reference`.
+
+    CAVEAT: the `start_year`/`end_year` filtering assumes this store's
+    filenames follow the same `init_YYYYMMDDT00.zarr` convention confirmed
+    for AIFS-single-v2's store (confirmed via `ls` on *that* path
+    specifically, not this ensemble path). If AIFS-ENS-v2's real filenames
+    differ, `_init_year` raises a clear `ValueError` rather than silently
+    doing the wrong thing -- so this is safe to try, just not independently
+    confirmed the way the deterministic store's naming was.
+
+    Used by the deterministic-verification notebook's `ensemble_mean()`
+    (below): the notebook calls `open_aifs_ensv2(...)`, then immediately
+    `ensemble_mean(...)` to collapse the `"number"` dimension away, so
+    everything downstream (`daily_aifs_aggregates_calendar_aligned`,
+    `daily_aifs_precipitation`, `daily_aifs_wet_bulb_calendar_aligned`,
+    `calculate_scores`, etc.) still only ever sees a single deterministic-like
+    field per (time, prediction_timedelta, latitude, longitude) -- none of
+    that code needed to change to support this.
+    """
+    root = Path("/net/monsoon/marchakitus/AIFS/v2p0/combined/forecasts_AIFS_ENS_v2")
+    paths = sorted(root.glob("*.zarr"))
+    for path in paths:
+        assert path.is_dir(), f"{path} does not exist?"
+
+    if start_year is not None or end_year is not None:
+        paths = [
+            path
+            for path in paths
+            if (start_year is None or _init_year(path) >= start_year)
+            and (end_year is None or _init_year(path) <= end_year)
+        ]
+        if not paths:
+            raise FileNotFoundError(
+                f"No AIFS-ENS-v2 initialization stores found under {root} "
+                f"for start_year={start_year}, end_year={end_year}"
+            )
+
+    wanted = ["2d", "2t", "tp"]
+    with ProgressBar():
+        ds = xr.open_mfdataset(
+            paths,
+            engine="zarr",
+            combine="nested",
+            concat_dim="time",
+            preprocess=lambda x: x[wanted],
+            chunks={
+                "time": 1,  # unavoidable: one time per store
+                "number": 26,  # combine all ensemble members
+                "prediction_timedelta": 24,
+                "latitude": 180,
+                "longitude": 180,
+            },
+            parallel=True,
+            data_vars="all",
+            coords="minimal",
+            compat="override",
+            join="override",
+            combine_attrs="override",
+            consolidated=None,
+        )
+    return ds.rename(
+        {
+            "2d": "2m_dewpoint_temperature",
+            "2t": "2m_temperature",
+            "tp": "total_precipitation",
+            "lat": "latitude",
+            "lon": "longitude",
+        }
+    )
+
+
+def ensemble_mean(ds: xr.Dataset, member_dim: str = "number") -> xr.Dataset:
+    """Collapse an ensemble dataset to its across-member mean.
+
+    Reduces AIFS-ENS-v2's 26-member ensemble down to one deterministic-like
+    field per (time, prediction_timedelta, latitude, longitude) -- the
+    "ensemble mean" forecast -- dropping `member_dim` entirely, so the result
+    can flow through the exact same deterministic-verification pipeline
+    originally written for AIFS-single-v2's single run
+    (`daily_aifs_aggregates_calendar_aligned`, `daily_aifs_precipitation`,
+    `daily_aifs_wet_bulb_calendar_aligned`, `calculate_scores`, etc.) with no
+    changes to any of that code -- none of it needs to know an ensemble was
+    ever involved.
+
+    Note the ensemble mean is a smoothed, less-extreme field than any
+    individual member or a true single-realization deterministic run:
+    averaging 26 members together cancels out each member's own
+    unpredictable small-scale detail, which tends to suppress the tails of
+    the distribution. So expect systematically lower POD (and likely lower
+    FAR too) for extreme-threshold events than AIFS-single-v2 gave -- that's
+    an expected property of verifying an ensemble mean against extremes, not
+    a bug.
+    """
+    if member_dim not in ds.dims:
+        raise ValueError(f"Dataset must have a {member_dim!r} dimension")
+    return ds.mean(dim=member_dim, skipna=True)
+
+
 def daily_aifs_aggregates(
     ds: xr.Dataset,
     max_days: int | None = None,
