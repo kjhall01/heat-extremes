@@ -15,6 +15,9 @@ dependencies:
   - ipykernel
   - matplotlib
   - dask
+  - pandas
+  - pyyaml
+  - pyarrow
   - pytorch
   - gcsfs
   - pip

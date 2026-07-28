@@ -1,0 +1,74 @@
+# Default production configuration.  Paths may contain ${ENVIRONMENT_VARIABLE}
+# and HEAT_VERIFICATION_RESULTS_ROOT overrides the result root at run time.
+model:
+  name: aifs_ens_v2
+  display_name: AIFS ENS v2
+  adapter: aifs_ens_v2
+  ensemble: true
+  # The current compact hazard stores retain only mean/probability products.
+  member_temperature_available: false
+
+paths:
+  raw_aifs_root: /net/monsoon/marchakitus/AIFS/v2p0/combined/forecasts_AIFS_ENS_v2
+  compact_monthly_store_pattern: /net/monsoon/kylehall/ERA5/heat_extremes_aifs_ens_v2/monthly/{year}/aifs_ens_v2_heat_{year}{month:02d}.zarr
+  era5_daily_temperature_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/daily/t2m_daily_mean.zarr
+  era5_hazard_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/hazards/t2m_daily_mean_q95_hazards.zarr
+  verification_results_root: /net/monsoon/kylehall/ERA5/heat_extremes_aifs_ens_v2/verification_results
+  # Leave null until scripts/verification/precompute_interval_quantiles.py has
+  # generated selected quantiles.  Example:
+  # interval_quantile_file_pattern: /net/monsoon/kylehall/ERA5/heat_extremes_aifs_ens_v2/verification_results/{model}/interval_quantiles/{year}-{month:02d}/forecast_day_{forecast_day}.nc
+  interval_quantile_file_pattern: null
+
+variables:
+  # Raw store variable 2t is renamed to this canonical name by the existing
+  # process_aifs_heat_month.py opener reused by optional quantile preprocessing.
+  raw_source_temperature: 2t
+  raw_member_temperature: 2m_temperature
+  ensemble_mean_temperature: t2m_daily_mean_ensemble_mean
+  interval_quantile_temperature: ensemble_temperature_quantile
+  event_probabilities:
+    hot_day_q95: hot_day_q95_probability
+    heatwave_start_q95_2d: heatwave_start_q95_2d_probability
+    heatwave_start_q95_3d: heatwave_start_q95_3d_probability
+
+observations:
+  daily_temperature_variable: t2m_daily_mean
+  event_variables:
+    hot_day_q95: hot_day_q95
+    heatwave_start_q95_2d: heatwave_start_q95_2d
+    heatwave_start_q95_3d: heatwave_start_q95_3d
+  temperature_units: K
+
+selection:
+  years: [2022, 2023, 2024, 2025]
+  # JJAS by default.  A Slurm array maps task IDs deterministically to these 16 partitions.
+  months: [6, 7, 8, 9]
+  # Existing compact monthly products label their first complete local day as 0.
+  forecast_days: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  map_forecast_days: [0, 5, 10, 13]
+
+chunking:
+  compact:
+    time: 1
+    forecast_day: 1
+    latitude: 180
+    longitude: 180
+  observations:
+    time: 31
+    latitude: 180
+    longitude: 180
+  quantiles:
+    initialization: 1
+    latitude: 180
+    longitude: 180
+
+metrics:
+  probability_bins: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  interval_levels: [0.5, 0.8, 0.9, 0.95]
+
+regions:
+  file: regions.yaml
+
+output:
+  # auto chooses Parquet when pyarrow is installed; CSV remains supported.
+  table_format: auto

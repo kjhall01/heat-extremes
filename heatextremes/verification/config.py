@@ -1,0 +1,192 @@
+"""Configuration loading and deterministic partition planning."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+import yaml
+
+
+DEFAULT_MONTHS = (6, 7, 8, 9)
+
+
+def _expand(value: Any) -> Any:
+    """Expand environment variables in recursively nested configuration values."""
+    if isinstance(value, str):
+        return os.path.expandvars(os.path.expanduser(value))
+    if isinstance(value, list):
+        return [_expand(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand(item) for key, item in value.items()}
+    return value
+
+
+def _deep_update(base: dict[str, Any], update: Mapping[str, Any]) -> dict[str, Any]:
+    for key, value in update.items():
+        if isinstance(value, Mapping) and isinstance(base.get(key), dict):
+            _deep_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+@dataclass(frozen=True)
+class Partition:
+    """One restartable verification partition."""
+
+    year: int
+    month: int
+
+    @property
+    def label(self) -> str:
+        return f"{self.year:04d}-{self.month:02d}"
+
+
+@dataclass(frozen=True)
+class VerificationConfig:
+    """Resolved YAML configuration with small, typed convenience accessors."""
+
+    path: Path
+    data: dict[str, Any]
+    config_hash: str
+
+    @property
+    def model_name(self) -> str:
+        return str(self.data["model"]["name"])
+
+    @property
+    def model_display_name(self) -> str:
+        return str(self.data["model"].get("display_name", self.model_name))
+
+    @property
+    def result_root(self) -> Path:
+        return Path(self.data["paths"]["verification_results_root"])
+
+    @property
+    def model_result_dir(self) -> Path:
+        return self.result_root / self.model_name
+
+    @property
+    def years(self) -> tuple[int, ...]:
+        return tuple(int(value) for value in self.data["selection"]["years"])
+
+    @property
+    def months(self) -> tuple[int, ...]:
+        return tuple(int(value) for value in self.data["selection"].get("months", DEFAULT_MONTHS))
+
+    @property
+    def forecast_days(self) -> tuple[int, ...]:
+        return tuple(int(value) for value in self.data["selection"]["forecast_days"])
+
+    @property
+    def map_forecast_days(self) -> tuple[int, ...]:
+        return tuple(int(value) for value in self.data["selection"].get("map_forecast_days", ()))
+
+    @property
+    def probability_bins(self) -> tuple[float, ...]:
+        return tuple(float(value) for value in self.data["metrics"]["probability_bins"])
+
+    @property
+    def interval_levels(self) -> tuple[float, ...]:
+        return tuple(float(value) for value in self.data["metrics"]["interval_levels"])
+
+    @property
+    def table_format(self) -> str:
+        return str(self.data.get("output", {}).get("table_format", "auto"))
+
+    @property
+    def region_file(self) -> Path:
+        configured = Path(self.data["regions"]["file"])
+        return configured if configured.is_absolute() else self.path.parent / configured
+
+    def partitions(self) -> tuple[Partition, ...]:
+        return tuple(Partition(year, month) for year in self.years for month in self.months)
+
+    def assert_partition_selected(self, year: int, month: int) -> None:
+        if year not in self.years or month not in self.months:
+            raise ValueError(
+                f"{year:04d}-{month:02d} is not in configured partitions "
+                f"(years={self.years}, months={self.months})"
+            )
+
+
+def load_config(
+    path: str | Path,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+) -> VerificationConfig:
+    """Read, resolve, and minimally validate a verification YAML file.
+
+    ``HEAT_VERIFICATION_RESULTS_ROOT`` is intentionally supported as an
+    environment override because it is often different on login and compute
+    nodes.  Other paths can use ordinary ``${VARIABLE}`` syntax in YAML.
+    """
+    config_path = Path(path).expanduser().resolve()
+    with config_path.open(encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError("Verification configuration must be a YAML mapping")
+
+    data = _expand(loaded)
+    if overrides:
+        data = _deep_update(data, _expand(dict(overrides)))
+    environment_result_root = os.environ.get("HEAT_VERIFICATION_RESULTS_ROOT")
+    if environment_result_root:
+        data.setdefault("paths", {})["verification_results_root"] = environment_result_root
+    environment_paths = {
+        "HEAT_AIFS_RAW_ROOT": "raw_aifs_root",
+        "HEAT_AIFS_COMPACT_MONTHLY_STORE_PATTERN": "compact_monthly_store_pattern",
+        "HEAT_ERA5_DAILY_TEMPERATURE_STORE": "era5_daily_temperature_store",
+        "HEAT_ERA5_HAZARD_STORE": "era5_hazard_store",
+        "HEAT_INTERVAL_QUANTILE_FILE_PATTERN": "interval_quantile_file_pattern",
+    }
+    for environment_name, config_name in environment_paths.items():
+        value = os.environ.get(environment_name)
+        if value:
+            data.setdefault("paths", {})[config_name] = value
+
+    _validate_config(data)
+    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
+    return VerificationConfig(
+        path=config_path,
+        data=data,
+        config_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    )
+
+
+def _validate_config(data: Mapping[str, Any]) -> None:
+    required = {
+        "model": ("name", "adapter"),
+        "paths": ("verification_results_root",),
+        "selection": ("years", "forecast_days"),
+        "metrics": ("probability_bins", "interval_levels"),
+        "regions": ("file",),
+    }
+    for section, names in required.items():
+        if section not in data or not isinstance(data[section], Mapping):
+            raise ValueError(f"Configuration is missing mapping {section!r}")
+        missing = [name for name in names if name not in data[section]]
+        if missing:
+            raise ValueError(f"Configuration section {section!r} is missing {missing}")
+
+    months = data["selection"].get("months", DEFAULT_MONTHS)
+    if not months or any(int(month) < 1 or int(month) > 12 for month in months):
+        raise ValueError("selection.months must contain calendar months 1 through 12")
+    if not data["selection"]["years"]:
+        raise ValueError("selection.years must not be empty")
+    if not data["selection"]["forecast_days"]:
+        raise ValueError("selection.forecast_days must not be empty")
+
+    bins = [float(value) for value in data["metrics"]["probability_bins"]]
+    if len(bins) < 2 or bins[0] != 0.0 or bins[-1] != 1.0 or any(
+        right <= left for left, right in zip(bins, bins[1:])
+    ):
+        raise ValueError("metrics.probability_bins must be strictly increasing from 0 to 1")
+    levels = [float(value) for value in data["metrics"]["interval_levels"]]
+    if any(not 0.0 < level < 1.0 for level in levels):
+        raise ValueError("metrics.interval_levels must be in the open interval (0, 1)")
