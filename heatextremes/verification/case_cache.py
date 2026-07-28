@@ -14,7 +14,7 @@ import json
 import os
 import shutil
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,6 +66,39 @@ def _cache_metadata(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _metadata_matches_case_identity(
+    metadata: Mapping[str, Any] | None,
+    config: VerificationConfig,
+    *,
+    year: int,
+    month: int,
+    forecast_day: int,
+) -> bool:
+    """Validate cache identity without trusting its configuration fingerprint."""
+    return bool(
+        metadata is not None
+        and metadata.get("verification_case_cache_schema") == CACHE_SCHEMA_VERSION
+        and metadata.get("model") == config.model_name
+        and metadata.get("year") == year
+        and metadata.get("month") == month
+        and metadata.get("forecast_day") == forecast_day
+        and tuple(metadata.get("events", ())) == CANONICAL_EVENTS
+        and metadata.get("ensemble") == bool(config.data["model"].get("ensemble", False))
+        and metadata.get("temperature_units")
+        == str(config.data.get("observations", {}).get("temperature_units", "unknown"))
+    )
+
+
+def _shortened_standard_horizon_can_adopt(config: VerificationConfig) -> bool:
+    """Limit broad legacy adoption to the known 0--14 raw-model transition."""
+    days = config.forecast_days
+    return bool(
+        config.data["model"].get("adapter") == "standard_reforecast_raw"
+        and days == tuple(range(len(days)))
+        and len(days) < 15
+    )
+
+
 def case_cache_store_is_valid(
     path: Path,
     config: VerificationConfig,
@@ -73,20 +106,66 @@ def case_cache_store_is_valid(
     year: int,
     month: int,
     forecast_day: int,
+    accepted_hashes: Collection[str] | None = None,
 ) -> bool:
     """Check that one committed Zarr cache store matches this scientific input."""
     metadata = _cache_metadata(path)
+    hashes = set(config.compatible_case_cache_hashes if accepted_hashes is None else accepted_hashes)
     return bool(
         path.is_dir()
         and (path / ".zmetadata").is_file()
-        and metadata is not None
-        and metadata.get("verification_case_cache_schema") == CACHE_SCHEMA_VERSION
-        and metadata.get("case_cache_hash") in config.compatible_case_cache_hashes
-        and metadata.get("model") == config.model_name
-        and metadata.get("year") == year
-        and metadata.get("month") == month
-        and metadata.get("forecast_day") == forecast_day
+        and _metadata_matches_case_identity(
+            metadata,
+            config,
+            year=year,
+            month=month,
+            forecast_day=forecast_day,
+        )
+        and metadata.get("case_cache_hash") in hashes
     )
+
+
+def _adoptable_legacy_store_hashes(
+    directory: Path,
+    config: VerificationConfig,
+    *,
+    year: int,
+    month: int,
+    forecast_days: Sequence[int],
+) -> frozenset[str]:
+    """Return older store fingerprints only for a complete safe-shortening set.
+
+    A cache lead is immutable once atomically committed.  This deliberately
+    narrow bridge exists for the transition from the original fixed 0--14
+    raw-model configuration to a shorter source-verified horizon.  All new
+    requested lead stores must already exist and agree on canonical schema,
+    model, date, event definitions, ensemble capability, and units.  Any
+    missing/incompatible store returns an empty set, preserving the normal
+    hash refusal instead of silently mixing scientific inputs.
+    """
+    if not _shortened_standard_horizon_can_adopt(config):
+        return frozenset()
+    hashes: set[str] = set()
+    for forecast_day in forecast_days:
+        store = case_cache_lead_path(config, year, month, forecast_day)
+        metadata = _cache_metadata(store)
+        if not (
+            store.is_dir()
+            and (store / ".zmetadata").is_file()
+            and _metadata_matches_case_identity(
+                metadata,
+                config,
+                year=year,
+                month=month,
+                forecast_day=forecast_day,
+            )
+        ):
+            return frozenset()
+        cache_hash = metadata.get("case_cache_hash") if metadata is not None else None
+        if not isinstance(cache_hash, str) or not cache_hash:
+            return frozenset()
+        hashes.add(cache_hash)
+    return frozenset(hashes)
 
 
 def case_cache_completion_is_valid(
@@ -103,6 +182,7 @@ def case_cache_completion_is_valid(
     except (OSError, json.JSONDecodeError):
         return False
     expected = payload.get("expected_stores")
+    adopted_hashes = payload.get("adopted_legacy_store_hashes", [])
     if (
         payload.get("status") != "complete"
         or payload.get("case_cache_hash") != config.case_cache_hash
@@ -110,7 +190,11 @@ def case_cache_completion_is_valid(
         or payload.get("year") != year
         or payload.get("month") != month
         or not isinstance(expected, list)
+        or not isinstance(adopted_hashes, list)
+        or any(not isinstance(value, str) for value in adopted_hashes)
     ):
+        return False
+    if adopted_hashes and not _shortened_standard_horizon_can_adopt(config):
         return False
     if sorted(expected) != [f"forecast_day_{day:03d}.zarr" for day in sorted(config.forecast_days)]:
         return False
@@ -121,6 +205,7 @@ def case_cache_completion_is_valid(
             year=year,
             month=month,
             forecast_day=forecast_day,
+            accepted_hashes=set(config.compatible_case_cache_hashes).union(adopted_hashes),
         )
         for forecast_day in config.forecast_days
     )
@@ -133,6 +218,7 @@ def _write_completion_marker(
     year: int,
     month: int,
     repository_root: Path | None,
+    adopted_legacy_store_hashes: Collection[str] = (),
 ) -> None:
     """Mark a complete configured cache partition after all stores validate."""
     partition = f"{year:04d}-{month:02d}"
@@ -146,6 +232,7 @@ def _write_completion_marker(
             "partition": partition,
             "case_cache_hash": config.case_cache_hash,
             "compatible_store_hashes": sorted(config.compatible_case_cache_hashes),
+            "adopted_legacy_store_hashes": sorted(set(adopted_legacy_store_hashes)),
             "git_commit": git_commit(repository_root or Path.cwd()),
             "creation_timestamp": now_utc(),
             "forecast_days": list(config.forecast_days),
@@ -339,16 +426,25 @@ def compute_case_cache_partition(
         raise FileExistsError(f"Case-cache partition exists: {directory}; use --resume or --overwrite")
     directory.mkdir(parents=True, exist_ok=True)
     progress_path = directory / "progress.json"
+    adopted_legacy_hashes: frozenset[str] = frozenset()
     if progress_path.is_file():
         progress = json.loads(progress_path.read_text(encoding="utf-8"))
         progress_hash = progress.get("case_cache_hash")
         if progress_hash not in config.compatible_case_cache_hashes:
-            raise RuntimeError(
-                "Existing case-cache partition has a different scientific cache hash; use --overwrite"
+            adopted_legacy_hashes = _adoptable_legacy_store_hashes(
+                directory,
+                config,
+                year=year,
+                month=month,
+                forecast_days=days,
             )
+            if not adopted_legacy_hashes:
+                raise RuntimeError(
+                    "Existing case-cache partition has a different scientific cache hash; use --overwrite"
+                )
         if progress_hash != config.case_cache_hash:
             print(
-                f"{partition}: adopting compatible committed case-cache stores from a prior lead range",
+                f"{partition}: adopting committed case-cache stores from a prior lead range",
                 flush=True,
             )
     else:
@@ -375,6 +471,7 @@ def compute_case_cache_partition(
             year=year,
             month=month,
             forecast_day=forecast_day,
+            accepted_hashes=set(config.compatible_case_cache_hashes).union(adopted_legacy_hashes),
         )
         for forecast_day in days
     )
@@ -386,6 +483,7 @@ def compute_case_cache_partition(
                 year=year,
                 month=month,
                 repository_root=repository_root,
+                adopted_legacy_store_hashes=adopted_legacy_hashes,
             )
         return CaseCacheResult(directory, False, days)
 

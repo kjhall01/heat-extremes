@@ -51,11 +51,15 @@ def test_shorter_discovered_lead_range_adopts_prior_committed_leads(tmp_path: Pa
         overrides={"selection": {"forecast_days": list(range(15))}},
     )
     assert historical.case_cache_hash in shortened.compatible_case_cache_hashes
+    # Simulate an older cache revision whose fingerprint predates the narrow
+    # signature bridge. Structural metadata, not an arbitrary cache hash, is
+    # what authorizes adoption for this specific shortened-horizon migration.
+    prior_cache_hash = "legacy-short-horizon-cache-fingerprint"
 
     directory = shortened.model_result_dir / "case_cache" / "2022-06"
     directory.mkdir(parents=True)
     (directory / "progress.json").write_text(
-        json.dumps({"status": "in_progress", "case_cache_hash": historical.case_cache_hash}),
+        json.dumps({"status": "in_progress", "case_cache_hash": prior_cache_hash}),
         encoding="utf-8",
     )
     for forecast_day in shortened.forecast_days:
@@ -66,11 +70,14 @@ def test_shorter_discovered_lead_range_adopts_prior_committed_leads(tmp_path: Pa
         cached.attrs.update(
             {
                 "verification_case_cache_schema": CACHE_SCHEMA_VERSION,
-                "case_cache_hash": historical.case_cache_hash,
+                "case_cache_hash": prior_cache_hash,
                 "model": shortened.model_name,
                 "year": 2022,
                 "month": 6,
                 "forecast_day": forecast_day,
+                "events": ["hot_day_q95", "heatwave_start_q95_2d", "heatwave_start_q95_3d"],
+                "ensemble": False,
+                "temperature_units": "unknown",
             }
         )
         cached.to_zarr(
