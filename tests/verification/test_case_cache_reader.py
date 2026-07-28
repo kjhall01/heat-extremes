@@ -29,6 +29,10 @@ def _write_case_store(path: Path, *, forecast_day: int, value: float) -> None:
             "latitude": [0.0],
             "longitude": [0.0],
             "forecast_day": forecast_day,
+            "valid_date": (
+                ("initialization", "longitude"),
+                np.asarray([["2022-06-01"]], dtype="datetime64[ns]"),
+            ),
         },
     ).chunk({"initialization": 1})
     dataset.to_zarr(path, mode="w", consolidated=True)
@@ -71,6 +75,7 @@ def test_lazy_case_cache_reader_fills_missing_leads_and_reports_them(
     assert dataset["forecast_temperature"].chunks is not None
     assert dataset.forecast_day.values.tolist() == [0, 1, 2]
     assert np.isnan(dataset["forecast_temperature"].sel(forecast_day=1).compute()).all()
+    assert np.isnat(dataset["valid_date"].sel(forecast_day=1).compute()).all()
     assert dataset["forecast_temperature"].sel(forecast_day=2).compute().item() == 282.0
 
 

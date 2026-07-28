@@ -566,10 +566,26 @@ def _nan_forecast_day_slice(template: xr.Dataset, forecast_day: int) -> xr.Datas
             drop=True,
         )
         variables[name] = xr.full_like(values, fill_value=np.nan, dtype=np.float32)
-    placeholder = xr.Dataset(variables)
+    coordinates = {
+        name: _missing_coordinate(values)
+        for name, values in template.coords.items()
+        if name not in template.dims and name != "forecast_day"
+    }
+    placeholder = xr.Dataset(variables, coords=coordinates)
     return placeholder.assign_coords(
         {dimension: template[dimension] for dimension in template.dims if dimension != "forecast_day"}
     ).assign_coords(forecast_day=[forecast_day])
+
+
+def _missing_coordinate(values: xr.DataArray) -> xr.DataArray:
+    """Return a missing-valued copy of an auxiliary coordinate, lazily."""
+    if np.issubdtype(values.dtype, np.datetime64):
+        return xr.full_like(values, fill_value=np.datetime64("NaT"), dtype=values.dtype)
+    if np.issubdtype(values.dtype, np.timedelta64):
+        return xr.full_like(values, fill_value=np.timedelta64("NaT"), dtype=values.dtype)
+    if np.issubdtype(values.dtype, np.number) or np.issubdtype(values.dtype, np.bool_):
+        return xr.full_like(values, fill_value=np.nan, dtype=np.float32)
+    return xr.full_like(values, fill_value=None, dtype=object)
 
 
 def _concat_months(monthly_datasets: Sequence[xr.Dataset]) -> xr.Dataset:
