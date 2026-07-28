@@ -190,9 +190,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import cartopy.crs as ccrs
+import dask.array as da
 import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+from global_land_mask import globe  # offline land/sea mask (Step 2) -- no network call, `pip install global-land-mask`
 from zarr.errors import ZarrUserWarning
 
 from era5_loader import (
@@ -389,17 +391,19 @@ wet_bulb_variables = {"t_wb_2m_mean_6h", "t_wb_2m_max_6h", "t_wb_2m_min_6h"}
 forecast_days = 10  # daily aggregation covers lead days up to (and including) day 9
 lead_days_to_plot = [1, 3, 5, 7, 9]
 
-# Absolute threshold: 35 degC, temperature-only (including wet-bulb
+# Absolute threshold: degC, temperature-only (including wet-bulb
 # temperature -- 35 degC wet-bulb is itself the commonly-cited human
-# heat-stress survivability limit, so the same number does double duty
-# here) -- doesn't apply to total_precipitation (units: meters/day), so it's
+# heat-stress survivability limit, which is why that's the default here) --
+# doesn't apply to total_precipitation (units: meters/day), so it's
 # automatically skipped for that variable (has_absolute_threshold below),
 # not applied with a meaningless number. Note daily *minimum* T2M (or
-# wet-bulb T) exceeding 35 degC is a much more extreme, rarer event than
-# daily mean or max doing so (it means the temperature never dropped below
-# 35 degC all day/night) -- Step 3's sanity check will make that obvious if
-# so.
-absolute_threshold = 35.0  # degC
+# wet-bulb T) exceeding this threshold is a much more extreme, rarer event
+# than daily mean or max doing so (it means the temperature never dropped
+# below it all day/night) -- Step 3's sanity check will make that obvious if
+# so. Overridable via the ABSOLUTE_THRESHOLD environment variable (see
+# run_notebook.slurm) -- no allowed-value restriction like RELATIVE_PERCENTILE
+# below, since this is a plain degC cutoff, not an index into a precomputed file.
+absolute_threshold = float(_env("ABSOLUTE_THRESHOLD", 35.0))  # degC
 has_absolute_threshold = variable != "total_precipitation"
 
 # Relative (climatology-percentile) threshold config. Uses Aaron Schwartz's
@@ -439,11 +443,15 @@ else:
 # Human-readable tag for which threshold(s) were actually computed (absolute,
 # relative, or both -- t2m_mean_6h gets absolute-only, total_precipitation
 # gets relative-only, t2m_max_6h/t2m_min_6h get both), used in the same
-# filenames -- so switching variable/relative_percentile never gets mistaken
-# for a previous, different result.
+# filenames -- so switching variable/relative_percentile/absolute_threshold
+# never gets mistaken for a previous, different result. Absolute's tag now
+# includes the actual threshold value (not just "abs") -- since
+# absolute_threshold is configurable (ABSOLUTE_THRESHOLD env var, above), a
+# fixed "abs" tag would let a cache written at one threshold get silently
+# reused for a run at a different threshold.
 _threshold_parts = []
 if has_absolute_threshold:
-    _threshold_parts.append("abs")
+    _threshold_parts.append(f"abs{absolute_threshold}")
 if has_relative_climatology:
     _threshold_parts.append(f"rel{relative_percentile}")
 threshold_label = "_".join(_threshold_parts) if _threshold_parts else "none"
@@ -720,7 +728,41 @@ model, era5 = xr.align(
     model, era5, join="inner", exclude=excluded_dimensions, copy=False
 )
 
-era5_var = era5[variable]
+# Ocean mask: build a static land/sea boolean on model/era5's shared,
+# already-aligned lat/lon grid (global_land_mask -- offline, no network call,
+# ships its own bundled land/water raster, so this works unchanged on a
+# Slurm node with no internet access; `pip install global-land-mask` if not
+# already present). True = land. Applied via `.where(land_mask)` so ocean
+# points become NaN rather than being dropped/reshaped -- extreme_indicators
+# (Step 4) already excludes any point where forecast, observation, or
+# threshold is NaN (see its docstring), so masking era5_var/model_var here is
+# enough to exclude every ocean grid cell from H/M/F/C/POD/FAR/SEDI
+# everywhere downstream, with no changes needed to the metric functions
+# themselves. compute_model_var (below) applies the same mask to the model
+# side so Step 3's sample is also land-only.
+#
+# Scattered to the cluster once (client.scatter + da.from_delayed) instead of
+# left as a plain NumPy-backed DataArray: compute_model_var runs once per
+# initialization inside Step 4's mean_in_time_batches (batch_size=1 -- one
+# separate .compute() per initialization, potentially hundreds over a
+# multi-year run), and a plain NumPy array referenced from a closure gets
+# fully re-serialized into *every one* of those task graphs. Confirmed this
+# directly: an unscattered ~13.5 MiB mask reproduced distributed's "Sending
+# large graph" warning on every single batch in a loop of separate compute()
+# calls; scattering it once and referencing the resulting Future (via
+# da.from_delayed) instead of the raw array dropped that to zero across all
+# batches, since every batch then just references the same already-on-worker
+# key rather than re-sending the bytes.
+_lon_grid, _lat_grid = np.meshgrid(era5.longitude.values, era5.latitude.values)
+_land_mask_values = globe.is_land(_lat_grid, _lon_grid)
+_land_mask_future = client.scatter(_land_mask_values, broadcast=True)
+land_mask = xr.DataArray(
+    da.from_delayed(_land_mask_future, shape=_land_mask_values.shape, dtype=_land_mask_values.dtype),
+    dims=("latitude", "longitude"),
+    coords={"latitude": era5.latitude, "longitude": era5.longitude},
+)
+
+era5_var = era5[variable].where(land_mask)
 
 # model was already restricted to [test_year_start, test_year_end] at load time
 # (open_aifs_ensv2's start_year/end_year), so this is just a defensive no-op,
@@ -823,12 +865,18 @@ def compute_model_var(model_batch: xr.Dataset) -> xr.DataArray:
     from model_batch's still-raw-Kelvin 2m_temperature/2m_dewpoint_temperature
     (see the wet_bulb_variables branch above, which deliberately leaves
     model's 2m_temperature unconverted for this reason) before aggregating.
+
+    `.where(land_mask)` is applied before returning (same land_mask built
+    above from era5's grid) so ocean grid cells are NaN here too -- keeps
+    Step 3's sample and every Step 4 score land-only, consistent with era5_var.
     \"\"\"
     if variable == "total_precipitation":
-        return daily_aifs_precipitation(model_batch, max_days=forecast_days)["total_precipitation"]
-    if variable in wet_bulb_variables:
-        return daily_aifs_wet_bulb_calendar_aligned(model_batch, max_days=forecast_days)[variable]
-    return daily_aifs_aggregates_calendar_aligned(model_batch, max_days=forecast_days)[variable]
+        result = daily_aifs_precipitation(model_batch, max_days=forecast_days)["total_precipitation"]
+    elif variable in wet_bulb_variables:
+        result = daily_aifs_wet_bulb_calendar_aligned(model_batch, max_days=forecast_days)[variable]
+    else:
+        result = daily_aifs_aggregates_calendar_aligned(model_batch, max_days=forecast_days)[variable]
+    return result.where(land_mask)
 
 
 threshold_by_doy"""

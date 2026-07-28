@@ -1,11 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=deterministic_verification
+#SBATCH --job-name=west_afric_95_aifs_tmin
 #SBATCH --partition=general
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=256G
-#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -47,7 +46,7 @@ mkdir -p logs
 #     (`:  "${VAR:=default}"` only sets VAR if it isn't already in the
 #     environment, so anything passed via --export takes precedence). ---
 : "${TEST_YEAR_START:=2022}"
-: "${TEST_YEAR_END:=2022}"    # inclusive; set > TEST_YEAR_START for a multi-year run
+: "${TEST_YEAR_END:=2025}"    # inclusive; set > TEST_YEAR_START for a multi-year run
 
 # Region: pick ONE of REGION (a name) or REGION_BOUNDS (raw numbers) --
 # _build_notebook.py's Step 0 raises if both end up set. REGION has no
@@ -56,7 +55,7 @@ mkdir -p logs
 # as before this option existed. Set REGION instead (e.g.
 # `--export=ALL,REGION=west_africa`) and leave REGION_BOUNDS unset -- don't
 # set both.
-: "${REGION:=}"  # global, tropics, nh_extratropics, sh_extratropics, conus, europe,
+: "${REGION:=west_africa}"  # global, tropics, nh_extratropics, sh_extratropics, conus, europe,
                  # east_asia, sea, south_asia, west_africa, east_africa, mena, lac
                  # (see _build_notebook.py's REGIONS dict for the exact box each one is)
 if [ -z "$REGION" ]; then
@@ -76,7 +75,7 @@ export REGION
                             # wet-bulb variables for either), and aurora additionally has no
                             # total_precipitation at all.
 
-: "${VARIABLE:=t2m_mean_6h}" # t2m_mean_6h, t2m_max_6h, t2m_min_6h, total_precipitation, or the
+: "${VARIABLE:=t2m_min_6h}" # t2m_mean_6h, t2m_max_6h, t2m_min_6h, total_precipitation, or the
                              # wet-bulb-temperature equivalents t_wb_2m_mean_6h/t_wb_2m_max_6h/
                              # t_wb_2m_min_6h (Stull 2011 approximation from 2m_temperature +
                              # 2m_dewpoint_temperature -- see wetbulb.py). Not every value is
