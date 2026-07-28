@@ -263,6 +263,12 @@ def _validate_config(data: Mapping[str, Any]) -> None:
         raise ValueError("selection.years must not be empty")
     if not data["selection"]["forecast_days"]:
         raise ValueError("selection.forecast_days must not be empty")
+    forecast_days = [int(value) for value in data["selection"]["forecast_days"]]
+    if any(day < 0 or day >= 15 for day in forecast_days):
+        raise ValueError(
+            "selection.forecast_days must be within 0 through 14 "
+            "(the supported 15-day forecast window)"
+        )
 
     bins = [float(value) for value in data["metrics"]["probability_bins"]]
     if len(bins) < 2 or bins[0] != 0.0 or bins[-1] != 1.0 or any(

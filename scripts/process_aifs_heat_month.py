@@ -52,6 +52,11 @@ DEFAULT_OUTPUT_ROOT = Path(
 SOURCE_VARIABLE = "2t"
 TEMPERATURE_NAME = "2m_temperature"
 THRESHOLD_NAME = "t2m_daily_mean_calendar_day_percentile"
+# All production heat-hazard and verification products use the first fifteen
+# local-solar forecast days (labels 0 through 14).  Keep this cap here, at the
+# shared transformation boundary, so a caller cannot accidentally construct a
+# much longer Dask graph from a raw store with additional leads.
+MAX_FORECAST_DAYS = 15
 
 DEFAULT_OPEN_CHUNKS = {
     "time": 1,
@@ -75,7 +80,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--year", type=int, required=True)
     parser.add_argument("--month", type=int, required=True, choices=range(1, 13))
-    parser.add_argument("--max-days", type=int, default=15)
+    parser.add_argument(
+        "--max-days",
+        type=int,
+        default=MAX_FORECAST_DAYS,
+        help=f"Number of local-solar forecast days to process (capped at {MAX_FORECAST_DAYS}).",
+    )
     parser.add_argument("--percentile", type=float, default=95.0)
     parser.add_argument("--aifs-root", type=Path, default=DEFAULT_AIFS_ROOT)
     parser.add_argument(
@@ -344,6 +354,10 @@ def local_solar_daily_mean_forecast(
     """Compute member-resolved local-solar daily-mean forecasts lazily."""
     if max_days < 1:
         raise ValueError("max_days must be at least one.")
+    # A few raw reforecast stores expose substantially longer horizons.  Do
+    # not let metadata discovery or an accidental caller request those leads:
+    # the project standard is exactly the first fifteen forecast days.
+    max_days = min(max_days, MAX_FORECAST_DAYS)
 
     temperature = temperature.where(
         temperature["prediction_timedelta"] < np.timedelta64(max_days, "D"),

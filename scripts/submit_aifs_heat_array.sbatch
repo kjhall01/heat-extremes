@@ -17,8 +17,10 @@ set -euo pipefail
 YEAR=$((2022 + SLURM_ARRAY_TASK_ID / 12))
 MONTH=$((1 + SLURM_ARRAY_TASK_ID % 12))
 
-
-PYTHON_SCRIPT="/home/kylehall/heat-extremes/scripts/process_aifs_heat_month.py"
+# Always execute the processor from the checkout that submitted this job,
+# rather than a separately maintained hard-coded checkout.
+REPOSITORY_ROOT="${REPOSITORY_ROOT:-${SLURM_SUBMIT_DIR:?Set REPOSITORY_ROOT or submit from the repository root}}"
+PYTHON_SCRIPT="${REPOSITORY_ROOT}/scripts/process_aifs_heat_month.py"
 
 PYTHON="${HOME}/miniconda3/envs/heat-extremes/bin/python"
 

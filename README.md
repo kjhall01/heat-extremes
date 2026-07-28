@@ -54,7 +54,8 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
 
 The inventory scans directory/store names and reads only metadata/coordinates
 from one source store per selected month to choose a lead range common to that
-model's JJAS tasks; it never reads temperature chunks. A source failure is
+model's JJAS tasks, capped at the supported first 15 forecast days (labels
+0--14); it never reads temperature chunks. A source failure is
 recorded under the affected model's `failures/` directory and does not stop
 other models. Aggregate-only all-model figures are written under
 `/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results/_all_models/figures/`.

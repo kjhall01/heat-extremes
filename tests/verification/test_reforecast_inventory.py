@@ -79,6 +79,32 @@ def test_inventory_uses_common_local_solar_leads_from_store_metadata(tmp_path: P
     assert config["selection"]["forecast_days"] == list(discovered_days)
 
 
+def test_inventory_caps_long_raw_horizons_at_fifteen_forecast_days(tmp_path: Path) -> None:
+    root = tmp_path / "reforecast"
+    source = root / "forecasts_long_horizon"
+    source.mkdir(parents=True)
+    longitude = np.asarray([0.0, 90.0, 180.0, 270.0])
+    raw = xr.Dataset(
+        {
+            "2t": (
+                ("time", "prediction_timedelta", "lat", "lon"),
+                np.full((1, 160, 1, longitude.size), 300.0),
+            )
+        },
+        coords={
+            "time": [np.datetime64("2022-06-01T00")],
+            "prediction_timedelta": np.arange(160) * np.timedelta64(6, "h"),
+            "lat": [0.0],
+            "lon": longitude,
+        },
+    )
+    raw.to_zarr(source / "init_2022-06-01.zarr", mode="w", consolidated=True)
+
+    inventory = inventory_reforecast_root(root, years=[2022], months=[6])
+
+    assert inventory[0].forecast_days == tuple(range(15))
+
+
 def test_metadata_registry_sets_deterministic_capability_and_excludes_gencast(tmp_path: Path) -> None:
     root = tmp_path / "reforecast"
     graphcast = root / "forecasts_graphcast_e2s"

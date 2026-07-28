@@ -302,6 +302,8 @@ and generated per-model YAML files under the results root, then submits two
 independent model/month arrays: canonical case cache, followed by cache-backed
 metrics. The registry's `N Members` field selects
 deterministic versus ensemble behavior; Gencast is explicitly excluded.
+Even when a raw source carries a longer horizon, inventory and processing are
+hard-capped to the first 15 local-solar forecast days (labels 0--14).
 Defaults select available 2022–2025 JJAS initializations:
 
 ```bash

@@ -146,9 +146,15 @@ def available_local_solar_forecast_days(store: Path, source_temperature_variable
             temperature = temperature.rename(coordinate_renames)
         if "prediction_timedelta" not in temperature.dims:
             raise ValueError("Source temperature lacks prediction_timedelta")
-        # The source coordinate defines the actual maximum; 366 days is only
-        # an upper selection bound and does not request data beyond the store.
-        daily = _processing_helpers().local_solar_daily_mean_forecast(temperature, max_days=366)
+        # Raw stores can expose horizons longer than this project's verified
+        # 15-day product window.  Inspect only the supported local-solar
+        # range; otherwise the generated config would submit unsupported
+        # leads merely because they are present in source metadata.
+        helpers = _processing_helpers()
+        daily = helpers.local_solar_daily_mean_forecast(
+            temperature,
+            max_days=helpers.MAX_FORECAST_DAYS,
+        )
         return tuple(int(value) for value in daily["forecast_day"].values)
     finally:
         dataset.close()
