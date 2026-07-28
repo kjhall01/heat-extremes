@@ -336,6 +336,22 @@ other models and tolerant aggregation continue. The aggregation status is in
 figures are written to `_all_models/figures/`. Start with one simultaneous raw
 task; raise `--max-concurrent` only after checking memory and filesystem load.
 
+## Opening the intermediate case cache
+
+Open all available cache slices for one model lazily, while reporting any
+missing forecast-day stores and replacing those in-month gaps with NaNs:
+
+```bash
+python scripts/verification/open_reforecast_case_cache.py \
+  --model-name aurora_e2s
+```
+
+The reader discovers expected month/lead coverage from
+`inventory/reforecast_inventory.json` when available.  It can represent a
+missing lead only when another lead exists for that month; a wholly missing
+month is reported but not fabricated because its initialization times are
+unknown.
+
 ## Scientific points needing confirmation
 
 - The production compact local-day `forecast_day` numbering is zero-based;
