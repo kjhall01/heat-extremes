@@ -2,7 +2,7 @@
 #SBATCH --job-name=era5_arco_cache
 #SBATCH --partition=general
 #SBATCH --qos=general
-#SBATCH --array=0-26%3
+#SBATCH --array=0-20%3
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
@@ -24,7 +24,7 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-YEAR=$((2000 + SLURM_ARRAY_TASK_ID))
+YEAR=$((1980 + SLURM_ARRAY_TASK_ID))
 CACHE_ARGS=(
     --year "$YEAR"
     --output-root "$OUTPUT_ROOT"
