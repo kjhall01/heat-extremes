@@ -54,6 +54,8 @@ The inventory scans only directory and store names. A source failure is
 recorded under the affected model's `failures/` directory and does not stop
 other models. Aggregate-only all-model figures are written under
 `/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results/_all_models/figures/`.
+The default registry is `Rossby Model Storage Locations - Sheet1.csv`; it
+sets deterministic versus ensemble behavior and explicitly excludes Gencast.
 
 Run the synthetic tests from a source checkout with:
 

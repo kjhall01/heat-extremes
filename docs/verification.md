@@ -29,6 +29,13 @@ but never writes a reconstructed forecast, matched-ERA5 cube, or
 member-temperature cube. Only the current lead's quantities are reduced into
 verification sufficient statistics.
 
+For a deterministic source, `ensemble: false` makes the daily-temperature
+forecast its own deterministic mean. Its q95 hot-day and event-onset
+"probabilities" are valid 0/1 forecasts, so Brier score is the weighted
+event-error rate and reliability diagrams use only the zero and one bins.
+Interval coverage is correctly unavailable. Temperature, conditional, spatial,
+and event Brier metrics remain comparable with ensembles.
+
 ## Current input convention
 
 Raw AIFS ENS v2 stores use source variable `2t` and dimensions
@@ -256,9 +263,12 @@ bash slurm/verification/submit_verification_workflow.sh \
 Use the all-model launcher when raw model directories differ only by model
 name, for example
 `/net/monsoon/marchakitus/reforecast/forecasts_aurora_e2s/init_*.zarr`. It
-scans directory/store names only, writes its manifest and generated per-model
-YAML files under the results root, then submits one independent model/month
-task. Defaults select available 2022–2025 JJAS initializations:
+uses `Rossby Model Storage Locations - Sheet1.csv` as its authoritative model
+registry, scans only the registered directory/store names, writes its manifest
+and generated per-model YAML files under the results root, then submits one
+independent model/month task. The registry's `N Members` field selects
+deterministic versus ensemble behavior; Gencast is explicitly excluded.
+Defaults select available 2022–2025 JJAS initializations:
 
 ```bash
 bash slurm/verification/submit_all_reforecasts_workflow.sh \
@@ -268,6 +278,8 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
   --months "6 7 8 9" \
   --max-concurrent 1
 ```
+
+Use a replacement registry explicitly with `--metadata-csv /path/to/models.csv`.
 
 Run it first with `--inventory-only` to inspect the generated manifest without
 submitting. The default source root is singular `reforecast`, following the

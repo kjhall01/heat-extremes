@@ -18,7 +18,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from heatextremes.verification.io import assert_safe_result_path, now_utc, write_json_atomic
-from heatextremes.verification.reforecast_inventory import inventory_reforecast_root, raw_reforecast_config
+from heatextremes.verification.reforecast_inventory import inventory_metadata_csv, raw_reforecast_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--results-root", type=Path, required=True)
     parser.add_argument("--repository-root", type=Path, required=True)
+    parser.add_argument(
+        "--metadata-csv",
+        type=Path,
+        help="Authoritative model registry; defaults to Rossby Model Storage Locations - Sheet1.csv in the repository root.",
+    )
     parser.add_argument("--years", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
     parser.add_argument("--months", type=int, nargs="+", default=[6, 7, 8, 9])
     parser.add_argument("--manifest", type=Path, required=True)
@@ -60,7 +65,10 @@ def main() -> None:
     region_file = args.repository_root.resolve() / "configs" / "verification" / "regions.yaml"
     if not region_file.is_file():
         raise FileNotFoundError(f"Region configuration is missing: {region_file}")
-    inventories = inventory_reforecast_root(root, years=args.years, months=args.months)
+    metadata_csv = args.metadata_csv or (args.repository_root.resolve() / "Rossby Model Storage Locations - Sheet1.csv")
+    inventories, skipped_models = inventory_metadata_csv(
+        metadata_csv.resolve(), root=root, years=args.years, months=args.months
+    )
     records: list[dict[str, object]] = []
     tasks: list[dict[str, object]] = []
     for item in inventories:
@@ -69,7 +77,10 @@ def main() -> None:
         records.append(
             {
                 "model": item.name,
+                "display_name": item.display_name,
                 "source_directory": str(item.directory),
+                "source_temperature_variable": item.source_temperature_variable,
+                "ensemble": item.ensemble,
                 "store_count": item.store_count,
                 "selected_partitions": selected,
                 "unparsed_store_names": list(item.unparsed_store_names),
@@ -95,7 +106,9 @@ def main() -> None:
         "results_root": str(results_root),
         "requested_years": sorted(set(args.years)),
         "requested_months": sorted(set(args.months)),
+        "metadata_csv": str(metadata_csv.resolve()),
         "models": records,
+        "skipped_metadata_models": skipped_models,
         "tasks": tasks,
         "task_count": len(tasks),
     }

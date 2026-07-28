@@ -100,8 +100,18 @@ class StandardReforecastAdapter(ModelAdapter):
             raw.close()
             raise ValueError("model.ensemble is true but the raw store has no 'number' member dimension")
         if not configured_ensemble and has_members:
-            raw.close()
-            raise ValueError("model.ensemble is false but the raw store contains 'number'; correct the configuration")
+            if raw.sizes[member_dimension] == 1:
+                # Some deterministic producers retain a singleton member axis.
+                # Treat it as deterministic rather than rejecting a valid
+                # 0/1 event forecast or inventing an ensemble diagnostic.
+                raw = raw.isel({member_dimension: 0}, drop=True)
+                has_members = False
+            else:
+                raw.close()
+                raise ValueError(
+                    "model.ensemble is false but the raw store contains multiple 'number' members; "
+                    "correct the metadata/configuration"
+                )
         self.capabilities = ModelCapabilities(
             ensemble=has_members,
             member_temperature=has_members,

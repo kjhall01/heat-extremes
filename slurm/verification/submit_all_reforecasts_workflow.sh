@@ -10,6 +10,7 @@ Usage: submit_all_reforecasts_workflow.sh [options]
 
 Options:
   --reforecast-root DIRECTORY   default: /net/monsoon/marchakitus/reforecast
+  --metadata-csv FILE           default: Rossby Model Storage Locations - Sheet1.csv in repository root
   --result-root DIRECTORY       default: /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results
   --years "YYYY ..."            default: "2022 2023 2024 2025"
   --months "MM ..."             default: "6 7 8 9"
@@ -20,6 +21,7 @@ EOF
 }
 
 REFORECAST_ROOT="/net/monsoon/marchakitus/reforecast"
+METADATA_CSV=""
 RESULT_ROOT="/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results"
 YEARS_TEXT="2022 2023 2024 2025"
 MONTHS_TEXT="6 7 8 9"
@@ -29,6 +31,7 @@ INVENTORY_ONLY=0
 while (( $# )); do
     case "$1" in
         --reforecast-root) REFORECAST_ROOT="$2"; shift 2 ;;
+        --metadata-csv) METADATA_CSV="$2"; shift 2 ;;
         --result-root) RESULT_ROOT="$2"; shift 2 ;;
         --years) YEARS_TEXT="$2"; shift 2 ;;
         --months) MONTHS_TEXT="$2"; shift 2 ;;
@@ -54,10 +57,12 @@ REFORECAST_ROOT="$(cd "${REFORECAST_ROOT}" && pwd)"
 RESULT_ROOT="${RESULT_ROOT%/}"
 MANIFEST="${RESULT_ROOT}/inventory/reforecast_inventory.json"
 CONFIG_DIRECTORY="${RESULT_ROOT}/inventory/configs"
+METADATA_CSV="${METADATA_CSV:-${REPOSITORY_ROOT}/Rossby Model Storage Locations - Sheet1.csv}"
 mkdir -p "${RESULT_ROOT}/logs" "${RESULT_ROOT}/inventory"
 
 "${PYTHON}" -u "${REPOSITORY_ROOT}/scripts/verification/inventory_reforecast_models.py" \
     --reforecast-root "${REFORECAST_ROOT}" \
+    --metadata-csv "${METADATA_CSV}" \
     --results-root "${RESULT_ROOT}" \
     --repository-root "${REPOSITORY_ROOT}" \
     --years ${YEARS_TEXT} --months ${MONTHS_TEXT} \

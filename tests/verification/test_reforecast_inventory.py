@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from heatextremes.verification.reforecast_inventory import inventory_reforecast_root, raw_reforecast_config
+from heatextremes.verification.reforecast_inventory import (
+    inventory_metadata_csv,
+    inventory_reforecast_root,
+    raw_reforecast_config,
+)
 
 
 def test_inventory_scans_only_standard_init_store_names(tmp_path: Path) -> None:
@@ -28,3 +32,26 @@ def test_inventory_scans_only_standard_init_store_names(tmp_path: Path) -> None:
     )
     assert config["model"]["adapter"] == "standard_reforecast_raw"
     assert config["selection"]["partitions"] == [{"year": 2022, "month": 6}]
+
+
+def test_metadata_registry_sets_deterministic_capability_and_excludes_gencast(tmp_path: Path) -> None:
+    root = tmp_path / "reforecast"
+    graphcast = root / "forecasts_graphcast_e2s"
+    ensemble = root / "forecasts_example_ens"
+    graphcast.mkdir(parents=True)
+    ensemble.mkdir()
+    (graphcast / "init_2022-06-01.zarr").mkdir()
+    (ensemble / "init_2022-06-01.zarr").mkdir()
+    metadata = tmp_path / "models.csv"
+    metadata.write_text(
+        "Model,N Members,Variables,Path\n"
+        f"GraphCast,N/A,2t,{graphcast}\n"
+        f"Example ENS,25,2t,{ensemble}\n"
+        f"gencast,52,2m_temperature,{root / 'forecasts_gencast'}\n",
+        encoding="utf-8",
+    )
+
+    inventory, skipped = inventory_metadata_csv(metadata, root=root, years=[2022], months=[6])
+    assert [item.name for item in inventory] == ["graphcast_e2s", "example_ens"]
+    assert {item.name: item.ensemble for item in inventory} == {"graphcast_e2s": False, "example_ens": True}
+    assert any(item["model"] == "gencast" and item["reason"] == "explicitly excluded" for item in skipped)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import numpy as np
@@ -113,3 +114,26 @@ def test_standard_raw_adapter_builds_one_canonical_lead_without_compact_output(t
         assert lead.interval_quantiles is not None
     finally:
         adapter.close_partition(opened)
+
+    deterministic_source = tmp_path / "forecasts_deterministic"
+    deterministic_source.mkdir()
+    # A singleton ``number`` axis is accepted as deterministic too.
+    _write_store(raw.isel(number=[0]), deterministic_source / "init_2022-06-01.zarr")
+    deterministic_payload = copy.deepcopy(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+    deterministic_payload["model"] = {
+        "name": "deterministic",
+        "adapter": "standard_reforecast_raw",
+        "ensemble": False,
+    }
+    deterministic_payload["paths"]["raw_reforecast_root"] = str(deterministic_source)
+    deterministic_path = tmp_path / "deterministic.yaml"
+    deterministic_path.write_text(yaml.safe_dump(deterministic_payload, sort_keys=False), encoding="utf-8")
+    deterministic_adapter = get_model_adapter(load_config(deterministic_path))
+    deterministic_opened = deterministic_adapter.open_partition(2022, 6)
+    try:
+        deterministic_lead = deterministic_adapter.lead(deterministic_opened, 0)
+        assert np.isclose(deterministic_lead.ensemble_mean_temperature.mean().compute().item(), 300.0)
+        assert np.isclose(deterministic_lead.event_probabilities["hot_day_q95"].mean().compute().item(), 0.0)
+        assert deterministic_lead.interval_quantiles is None
+    finally:
+        deterministic_adapter.close_partition(deterministic_opened)
