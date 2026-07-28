@@ -86,6 +86,7 @@ def open_model_intermediates(
     years: Sequence[int] | None = None,
     months: Sequence[int] | None = DEFAULT_VERIFICATION_MONTHS,
     chunks: Mapping[str, int] | str = "auto",
+    verbose: bool = True,
 ) -> xr.Dataset:
     """Open a model's intermediate stores lazily and fill missing leads with NaNs.
 
@@ -113,12 +114,14 @@ def open_model_intermediates(
             years=years,
             months=months,
             chunks=chunks,
+            verbose=verbose,
         )
     return _open_modern_case_cache(
         model_name,
         results_root=results_root,
         forecast_days=forecast_days,
         chunks=chunks,
+        verbose=verbose,
     )
 
 
@@ -133,6 +136,7 @@ def open_model_case_cache(
     years: Sequence[int] | None = None,
     months: Sequence[int] | None = DEFAULT_VERIFICATION_MONTHS,
     chunks: Mapping[str, int] | str = "auto",
+    verbose: bool = True,
 ) -> xr.Dataset:
     """Backward-compatible name for :func:`open_model_intermediates`."""
     return open_model_intermediates(
@@ -145,6 +149,7 @@ def open_model_case_cache(
         years=years,
         months=months,
         chunks=chunks,
+        verbose=verbose,
     )
 
 
@@ -154,6 +159,7 @@ def _open_modern_case_cache(
     results_root: str | Path,
     forecast_days: Sequence[int] | None,
     chunks: Mapping[str, int] | str,
+    verbose: bool,
 ) -> xr.Dataset:
     """Open a modern model's case-cache stores lazily and fill missing leads.
 
@@ -172,6 +178,11 @@ def _open_modern_case_cache(
     if not expected_partitions:
         expected_partitions = tuple(sorted(discovered_partitions))
     expected_days = _expected_forecast_days(forecast_days, manifest_days)
+    _log(
+        f"Modern cache {model_name}: {len(expected_partitions)} month(s), "
+        f"forecast days {list(expected_days)}, root={cache_root}",
+        verbose,
+    )
 
     missing_partitions = tuple(
         partition for partition in expected_partitions if partition not in discovered_partitions
@@ -180,19 +191,32 @@ def _open_modern_case_cache(
     incomplete_slices: list[tuple[str, int]] = []
     monthly_datasets: list[xr.Dataset] = []
 
-    for partition in expected_partitions:
+    for index, partition in enumerate(expected_partitions, start=1):
         directory = discovered_partitions.get(partition)
         if directory is None:
+            _log(f"[{index}/{len(expected_partitions)}] {partition}: missing month directory", verbose)
             continue
-        monthly, missing, incomplete = _open_partition(
-            directory,
-            expected_days,
-            chunks=chunks,
-        )
+        _log(f"[{index}/{len(expected_partitions)}] Opening {partition}: {directory}", verbose)
+        try:
+            monthly, missing, incomplete = _open_partition(
+                directory,
+                expected_days,
+                chunks=chunks,
+            )
+        except Exception:
+            _log(f"[{index}/{len(expected_partitions)}] {partition}: FAILED while opening", verbose)
+            raise
         missing_slices.extend((partition, forecast_day) for forecast_day in missing)
         incomplete_slices.extend((partition, forecast_day) for forecast_day in incomplete)
         if monthly is not None:
             monthly_datasets.append(monthly)
+            _log(
+                f"[{index}/{len(expected_partitions)}] {partition}: ready "
+                f"({len(expected_days) - len(missing)}/{len(expected_days)} lead stores)",
+                verbose,
+            )
+        else:
+            _log(f"[{index}/{len(expected_partitions)}] {partition}: no readable lead stores", verbose)
 
     report = CaseCacheAvailability(
         model_name=model_name,
@@ -202,7 +226,7 @@ def _open_modern_case_cache(
         incomplete_slices=tuple(incomplete_slices),
         manifest_used=manifest_used,
     )
-    print(report.format_report(), flush=True)
+    _log(report.format_report(), verbose)
     if not monthly_datasets:
         raise FileNotFoundError(
             f"No readable case-cache stores found for model {model_name!r} beneath {cache_root}"
@@ -219,6 +243,10 @@ def _open_modern_case_cache(
         intermediate_reader_missing_slices=json.dumps(list(missing_slices)),
         intermediate_reader_incomplete_slices=json.dumps(list(incomplete_slices)),
     )
+    _log(
+        f"Modern cache {model_name}: ready; data remain lazy until compute/load/plot.",
+        verbose,
+    )
     return dataset
 
 
@@ -232,6 +260,7 @@ def _open_legacy_aifs_monthly_intermediates(
     years: Sequence[int] | None,
     months: Sequence[int] | None,
     chunks: Mapping[str, int] | str,
+    verbose: bool,
 ) -> xr.Dataset:
     """Open and canonically align the compact monthly AIFS stores lazily."""
     root = Path(monthly_root).expanduser()
@@ -245,11 +274,20 @@ def _open_legacy_aifs_monthly_intermediates(
     if not stores:
         raise FileNotFoundError(f"No AIFS ENS v2 monthly stores found beneath {root}")
     expected_days = _expected_forecast_days(forecast_days, None)
+    _log(
+        f"Legacy AIFS monthly: {len(stores)} store(s), forecast days {list(expected_days)}, root={root}",
+        verbose,
+    )
     missing_slices: list[tuple[str, int]] = []
     monthly_datasets: list[xr.Dataset] = []
 
-    for partition, path in stores:
-        dataset = xr.open_zarr(path, consolidated=False, chunks=chunks)
+    for index, (partition, path) in enumerate(stores, start=1):
+        _log(f"[{index}/{len(stores)}] Opening {partition}: {path}", verbose)
+        try:
+            dataset = xr.open_zarr(path, consolidated=False, chunks=chunks)
+        except Exception:
+            _log(f"[{index}/{len(stores)}] {partition}: FAILED while opening", verbose)
+            raise
         if "forecast_day" not in dataset.dims:
             raise ValueError(f"Legacy AIFS monthly store lacks forecast_day: {path}")
         available_days = {int(day) for day in dataset["forecast_day"].values}
@@ -258,6 +296,11 @@ def _open_legacy_aifs_monthly_intermediates(
         # ``reindex`` is lazy for data arrays and fills absent compact-product
         # leads with NaN, including their valid-date coordinate.
         monthly_datasets.append(dataset.reindex(forecast_day=expected_days))
+        _log(
+            f"[{index}/{len(stores)}] {partition}: ready "
+            f"({len(expected_days) - len(missing)}/{len(expected_days)} leads)",
+            verbose,
+        )
 
     if not monthly_datasets:
         raise FileNotFoundError(f"No matching AIFS ENS v2 monthly stores found beneath {root}")
@@ -271,23 +314,24 @@ def _open_legacy_aifs_monthly_intermediates(
         combine_attrs="override",
     ).sortby("time")
     compact = _canonicalize_dimensions(compact)
+    _log("Matching legacy AIFS fields to ERA5 temperature and events lazily...", verbose)
     dataset = _canonicalize_legacy_aifs(
         compact,
         daily_temperature_store=era5_daily_temperature_store,
         hazard_store=era5_hazard_store,
         chunks=chunks,
     )
-    print(
+    _log(
         f"Legacy AIFS monthly report for {model_name}: {len(monthly_datasets)} month(s), "
         f"{len(missing_slices)} missing lead slice(s).",
-        flush=True,
+        verbose,
     )
     if missing_slices:
         details = ", ".join(
             f"{partition}/forecast_day_{forecast_day:03d}"
             for partition, forecast_day in missing_slices
         )
-        print("Filled with NaNs: " + details, flush=True)
+        _log("Filled with NaNs: " + details, verbose)
     dataset.attrs = dict(dataset.attrs)
     dataset.attrs.update(
         intermediate_reader_source="legacy_aifs_monthly",
@@ -300,7 +344,16 @@ def _open_legacy_aifs_monthly_intermediates(
         intermediate_reader_expected_forecast_days=json.dumps(list(expected_days)),
         intermediate_reader_missing_slices=json.dumps(list(missing_slices)),
     )
+    _log(
+        f"Legacy AIFS monthly {model_name}: ready; data remain lazy until compute/load/plot.",
+        verbose,
+    )
     return dataset
+
+
+def _log(message: str, verbose: bool) -> None:
+    if verbose:
+        print(f"[intermediate-reader] {message}", flush=True)
 
 
 def _legacy_aifs_monthly_stores(

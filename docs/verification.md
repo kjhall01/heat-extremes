@@ -355,6 +355,9 @@ validity masks). All other model names use modern canonical case-cache stores.
 The legacy AIFS route defaults to JJAS, avoiding slow metadata opens for
 months outside the verification period; select a smaller subset with
 `--years` and `--months` before plotting.
+The opener prints each store/partition as it is opened, its available lead
+count, ERA5-alignment progress, and a final lazy-ready message. Use `--quiet`
+only when that progress reporting is not wanted.
 
 The reader discovers expected month/lead coverage from
 `inventory/reforecast_inventory.json` when available.  It can represent a

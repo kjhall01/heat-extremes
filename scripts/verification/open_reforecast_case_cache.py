@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_VERIFICATION_MONTHS,
         help="Legacy AIFS months to open; default is JJAS, 6 7 8 9 (ignored for modern models).",
     )
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress logging.")
     return parser.parse_args()
 
 
@@ -83,6 +84,7 @@ def main() -> None:
         forecast_days=args.forecast_days,
         years=args.years,
         months=args.months,
+        verbose=not args.quiet,
     )
     print(dataset)
 

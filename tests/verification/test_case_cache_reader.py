@@ -70,6 +70,8 @@ def test_lazy_case_cache_reader_fills_missing_leads_and_reports_them(
     dataset = open_model_case_cache("example_model", results_root=results_root)
 
     output = capsys.readouterr().out
+    assert "[1/2] Opening 2022-06" in output
+    assert "Modern cache example_model: ready; data remain lazy" in output
     assert "Filled with NaNs: 2022-06/forecast_day_001" in output
     assert "Missing month(s): 2022-07" in output
     assert dataset["forecast_temperature"].chunks is not None
