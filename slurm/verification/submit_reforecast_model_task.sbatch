@@ -49,7 +49,11 @@ if [[ -n "${VERIFICATION_DECISION_THRESHOLDS:-}" ]]; then
     read -r -a REQUESTED_THRESHOLDS <<< "${VERIFICATION_DECISION_THRESHOLDS}"
     DECISION_ARGS=(--decision-thresholds "${REQUESTED_THRESHOLDS[@]}")
 fi
-srun "${PYTHON}" -u "${REPOSITORY_ROOT}/scripts/verification/compute_reforecast_task.py" \
+# Some cluster partitions provide a non-contiguous CPU allocation whose
+# inherited affinity mask cannot be satisfied by srun's default binding.
+# The task is internally thread-limited above, so disable the invalid binding
+# request while retaining the Slurm CPU allocation.
+srun --cpu-bind=none "${PYTHON}" -u "${REPOSITORY_ROOT}/scripts/verification/compute_reforecast_task.py" \
     --manifest "${MANIFEST}" --task-index "${SLURM_ARRAY_TASK_ID}" --stage "${VERIFICATION_STAGE}" \
     "${REGION_ARGS[@]}" "${BIN_ARGS[@]}" "${DECISION_ARGS[@]}" "${OVERWRITE_ARGS[@]}"
 
