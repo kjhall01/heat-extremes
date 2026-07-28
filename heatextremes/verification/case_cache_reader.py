@@ -612,13 +612,22 @@ def _nan_forecast_day_slice(template: xr.Dataset, forecast_day: int) -> xr.Datas
     variables: dict[str, xr.DataArray] = {}
     for name, values in template.data_vars.items():
         # The cache schema only contains numeric/bool science fields.  A float
-        # placeholder represents missing values consistently for every field,
-        # including validity masks and the uint8 observed-event encoding.
+        # placeholder represents missing science values consistently, while
+        # validity masks retain their boolean contract.
         values = values.reset_coords(
             [coordinate for coordinate in values.coords if coordinate not in values.dims],
             drop=True,
         )
-        variables[name] = xr.full_like(values, fill_value=np.nan, dtype=np.float32)
+        if name in {"temperature_case_valid", "event_case_valid"}:
+            # A missing lead has no valid cases. Keep masks boolean so callers
+            # can safely use them in ``where`` and boolean expressions.
+            variables[name] = xr.zeros_like(values, dtype=bool)
+        elif name == "observed_event":
+            # The paired event_case_valid mask is false for this whole slice,
+            # so zero is an unambiguous non-scored placeholder.
+            variables[name] = xr.zeros_like(values, dtype=np.uint8)
+        else:
+            variables[name] = xr.full_like(values, fill_value=np.nan, dtype=np.float32)
     coordinates = {
         name: _missing_coordinate(values)
         for name, values in template.coords.items()

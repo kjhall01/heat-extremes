@@ -23,12 +23,17 @@ def _write_case_store(path: Path, *, forecast_day: int, value: float) -> None:
                 ("initialization", "latitude", "longitude"),
                 np.ones((1, 1, 1), dtype=bool),
             ),
+            "event_case_valid": (
+                ("event", "initialization", "latitude", "longitude"),
+                np.ones((1, 1, 1, 1), dtype=bool),
+            ),
         },
         coords={
             "initialization": [np.datetime64("2022-06-01")],
             "latitude": [0.0],
             "longitude": [0.0],
             "forecast_day": forecast_day,
+            "event": ["hot_day_q95"],
             "valid_date": (
                 ("initialization", "longitude"),
                 np.asarray([["2022-06-01"]], dtype="datetime64[ns]"),
@@ -78,6 +83,8 @@ def test_lazy_case_cache_reader_fills_missing_leads_and_reports_them(
     assert dataset.forecast_day.values.tolist() == [0, 1, 2]
     assert np.isnan(dataset["forecast_temperature"].sel(forecast_day=1).compute()).all()
     assert np.isnat(dataset["valid_date"].sel(forecast_day=1).compute()).all()
+    assert dataset["event_case_valid"].dtype == bool
+    assert not dataset["event_case_valid"].sel(forecast_day=1).compute().any()
     assert dataset["forecast_temperature"].sel(forecast_day=2).compute().item() == 282.0
 
 
