@@ -25,6 +25,7 @@ def test_inventory_scans_only_standard_init_store_names(tmp_path: Path) -> None:
     assert [item.name for item in inventory] == ["aurora_e2s", "other"]
     assert inventory[0].partitions == ((2022, 6),)
     assert inventory[0].store_count == 2
+    assert inventory[0].source_store_glob == "init_*.zarr"
     assert inventory[1].partitions == ((2023, 7),)
 
     config = raw_reforecast_config(
@@ -38,20 +39,29 @@ def test_metadata_registry_sets_deterministic_capability_and_excludes_gencast(tm
     root = tmp_path / "reforecast"
     graphcast = root / "forecasts_graphcast_e2s"
     ensemble = root / "forecasts_example_ens"
+    aifs_ens = tmp_path / "forecasts_AIFS_ENS_v2"
     graphcast.mkdir(parents=True)
     ensemble.mkdir()
+    aifs_ens.mkdir()
     (graphcast / "init_2022-06-01.zarr").mkdir()
     (ensemble / "init_2022-06-01.zarr").mkdir()
+    (aifs_ens / "forecast_2022-06-01.zarr").mkdir()
     metadata = tmp_path / "models.csv"
     metadata.write_text(
         "Model,N Members,Variables,Path\n"
         f"GraphCast,N/A,2t,{graphcast}\n"
         f"Example ENS,25,2t,{ensemble}\n"
+        f"AIFS-ENS-v2,25,2t,{aifs_ens}\n"
         f"gencast,52,2m_temperature,{root / 'forecasts_gencast'}\n",
         encoding="utf-8",
     )
 
     inventory, skipped = inventory_metadata_csv(metadata, root=root, years=[2022], months=[6])
-    assert [item.name for item in inventory] == ["graphcast_e2s", "example_ens"]
-    assert {item.name: item.ensemble for item in inventory} == {"graphcast_e2s": False, "example_ens": True}
+    assert [item.name for item in inventory] == ["graphcast_e2s", "example_ens", "aifs_ens_v2"]
+    assert {item.name: item.ensemble for item in inventory} == {
+        "graphcast_e2s": False,
+        "example_ens": True,
+        "aifs_ens_v2": True,
+    }
+    assert inventory[-1].source_store_glob == "*.zarr"
     assert any(item["model"] == "gencast" and item["reason"] == "explicitly excluded" for item in skipped)

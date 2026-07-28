@@ -30,6 +30,7 @@ class ReforecastModelInventory:
     display_name: str
     ensemble: bool
     source_temperature_variable: str
+    source_store_glob: str
 
 
 def store_year_month(path: Path) -> tuple[int, int] | None:
@@ -75,6 +76,7 @@ def inventory_reforecast_root(
                 wanted=wanted,
                 ensemble=True,
                 source_temperature_variable="2t",
+                source_store_glob="init_*.zarr",
             )
         )
     return found
@@ -88,8 +90,9 @@ def _inventory_directory(
     wanted: set[tuple[int, int]],
     ensemble: bool,
     source_temperature_variable: str,
+    source_store_glob: str,
 ) -> ReforecastModelInventory:
-    stores = sorted(path for path in directory.glob("init_*.zarr") if path.is_dir())
+    stores = sorted(path for path in directory.glob(source_store_glob) if path.is_dir())
     grouped: dict[tuple[int, int], int] = defaultdict(int)
     unparsed: list[str] = []
     for store in stores:
@@ -107,6 +110,7 @@ def _inventory_directory(
         display_name=display_name,
         ensemble=ensemble,
         source_temperature_variable=source_temperature_variable,
+        source_store_glob=source_store_glob,
     )
 
 
@@ -141,13 +145,15 @@ def inventory_metadata_csv(
     years: Iterable[int],
     months: Iterable[int],
     excluded_model_names: Iterable[str] = ("gencast",),
+    allowed_external_model_names: Iterable[str] = ("aifs-ens-v2",),
 ) -> tuple[list[ReforecastModelInventory], list[dict[str, str]]]:
     """Inventory models listed in the CSV registry, not arbitrary directories.
 
     The registry decides deterministic versus ensemble capability from
     ``N Members`` and permits a configured raw temperature source of either
-    ``2t`` or ``2m_temperature``.  The source stores themselves are never
-    opened here.
+    ``2t`` or ``2m_temperature``. AIFS-ENS-v2 is allowed outside the generic
+    root because it is the established pilot source with ``*.zarr`` rather
+    than ``init_*.zarr`` names. The source stores are never opened here.
     """
     if not metadata_csv.is_file():
         raise FileNotFoundError(f"Model metadata CSV is missing: {metadata_csv}")
@@ -156,6 +162,7 @@ def inventory_metadata_csv(
     root = root.resolve()
     wanted = {(int(year), int(month)) for year in years for month in months}
     excluded = {name.casefold() for name in excluded_model_names}
+    allowed_external = {name.casefold() for name in allowed_external_model_names}
     inventories: list[ReforecastModelInventory] = []
     skipped: list[dict[str, str]] = []
     seen_directories: set[Path] = set()
@@ -174,8 +181,11 @@ def inventory_metadata_csv(
                 try:
                     candidate.resolve(strict=False).relative_to(root)
                 except ValueError:
-                    continue
-                candidates.append(candidate)
+                    if display_name.casefold() not in allowed_external:
+                        continue
+                    candidates.append(candidate)
+                else:
+                    candidates.append(candidate)
             if not candidates:
                 skipped.append({"model": display_name, "reason": "no metadata path beneath selected reforecast root"})
                 continue
@@ -209,6 +219,7 @@ def inventory_metadata_csv(
                         wanted=wanted,
                         ensemble=ensemble,
                         source_temperature_variable=variable,
+                        source_store_glob=("*.zarr" if display_name.casefold() in allowed_external else "init_*.zarr"),
                     )
                 )
     return inventories, skipped

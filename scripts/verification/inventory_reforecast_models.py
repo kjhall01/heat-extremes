@@ -80,6 +80,7 @@ def main() -> None:
                 "display_name": item.display_name,
                 "source_directory": str(item.directory),
                 "source_temperature_variable": item.source_temperature_variable,
+                "source_store_glob": item.source_store_glob,
                 "ensemble": item.ensemble,
                 "store_count": item.store_count,
                 "selected_partitions": selected,

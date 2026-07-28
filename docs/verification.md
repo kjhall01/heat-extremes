@@ -281,6 +281,11 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
 
 Use a replacement registry explicitly with `--metadata-csv /path/to/models.csv`.
 
+The registry's AIFS-ENS-v2 entry is deliberately included even though its raw
+path is outside the generic `reforecast` root. It is the established pilot
+source and uses its historical `*.zarr` filename convention; it receives the
+raw ensemble adapter, including bounded central-interval coverage diagnostics.
+
 Run it first with `--inventory-only` to inspect the generated manifest without
 submitting. The default source root is singular `reforecast`, following the
 provided example; use `--reforecast-root /net/monsoon/marchakitus/reforecasts`
