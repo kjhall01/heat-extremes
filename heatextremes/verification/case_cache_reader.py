@@ -32,6 +32,7 @@ DEFAULT_ERA5_HAZARD_STORE = Path(
 )
 LEGACY_AIFS_MODEL_NAMES = frozenset({"aifs_ens_v2", "aifs-ens-v2"})
 SUPPORTED_FORECAST_DAYS = tuple(range(15))
+DEFAULT_VERIFICATION_MONTHS = (6, 7, 8, 9)
 _PARTITION_PATTERN = re.compile(r"(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])")
 _STORE_PATTERN = re.compile(r"forecast_day_(?P<forecast_day>\d{3})\.zarr")
 _AIFS_MONTHLY_STORE_PATTERN = re.compile(r"aifs_ens_v2_heat_(?P<year>\d{4})(?P<month>0[1-9]|1[0-2])\.zarr")
@@ -82,6 +83,8 @@ def open_model_intermediates(
     era5_daily_temperature_store: str | Path = DEFAULT_ERA5_DAILY_TEMPERATURE_STORE,
     era5_hazard_store: str | Path = DEFAULT_ERA5_HAZARD_STORE,
     forecast_days: Sequence[int] | None = None,
+    years: Sequence[int] | None = None,
+    months: Sequence[int] | None = DEFAULT_VERIFICATION_MONTHS,
     chunks: Mapping[str, int] | str = "auto",
 ) -> xr.Dataset:
     """Open a model's intermediate stores lazily and fill missing leads with NaNs.
@@ -96,7 +99,9 @@ def open_model_intermediates(
     The legacy route matches ERA5 temperature and event fields lazily using
     the compact store's ``valid_date`` coordinate.  ``results_root`` is used
     only by modern case-cache models; the monthly and ERA5 paths are used only
-    by AIFS ENS v2.
+    by AIFS ENS v2.  For AIFS, ``months`` defaults to JJAS so it matches the
+    verification workflow without opening irrelevant monthly stores; pass
+    ``months=None`` to include every discovered month.
     """
     if model_name.casefold() in LEGACY_AIFS_MODEL_NAMES:
         return _open_legacy_aifs_monthly_intermediates(
@@ -105,6 +110,8 @@ def open_model_intermediates(
             era5_daily_temperature_store=era5_daily_temperature_store,
             era5_hazard_store=era5_hazard_store,
             forecast_days=forecast_days,
+            years=years,
+            months=months,
             chunks=chunks,
         )
     return _open_modern_case_cache(
@@ -123,6 +130,8 @@ def open_model_case_cache(
     era5_daily_temperature_store: str | Path = DEFAULT_ERA5_DAILY_TEMPERATURE_STORE,
     era5_hazard_store: str | Path = DEFAULT_ERA5_HAZARD_STORE,
     forecast_days: Sequence[int] | None = None,
+    years: Sequence[int] | None = None,
+    months: Sequence[int] | None = DEFAULT_VERIFICATION_MONTHS,
     chunks: Mapping[str, int] | str = "auto",
 ) -> xr.Dataset:
     """Backward-compatible name for :func:`open_model_intermediates`."""
@@ -133,6 +142,8 @@ def open_model_case_cache(
         era5_daily_temperature_store=era5_daily_temperature_store,
         era5_hazard_store=era5_hazard_store,
         forecast_days=forecast_days,
+        years=years,
+        months=months,
         chunks=chunks,
     )
 
@@ -218,22 +229,26 @@ def _open_legacy_aifs_monthly_intermediates(
     era5_daily_temperature_store: str | Path,
     era5_hazard_store: str | Path,
     forecast_days: Sequence[int] | None,
+    years: Sequence[int] | None,
+    months: Sequence[int] | None,
     chunks: Mapping[str, int] | str,
 ) -> xr.Dataset:
     """Open and canonically align the compact monthly AIFS stores lazily."""
     root = Path(monthly_root).expanduser()
-    paths = sorted(root.glob("20??/aifs_ens_v2_heat_20????.zarr"))
-    if not paths:
+    requested_years = _validate_years(years)
+    requested_months = _validate_months(months)
+    stores = _legacy_aifs_monthly_stores(
+        root,
+        years=requested_years,
+        months=requested_months,
+    )
+    if not stores:
         raise FileNotFoundError(f"No AIFS ENS v2 monthly stores found beneath {root}")
     expected_days = _expected_forecast_days(forecast_days, None)
     missing_slices: list[tuple[str, int]] = []
     monthly_datasets: list[xr.Dataset] = []
 
-    for path in paths:
-        match = _AIFS_MONTHLY_STORE_PATTERN.fullmatch(path.name)
-        if match is None:
-            continue
-        partition = f"{match.group('year')}-{match.group('month')}"
+    for partition, path in stores:
         dataset = xr.open_zarr(path, consolidated=False, chunks=chunks)
         if "forecast_day" not in dataset.dims:
             raise ValueError(f"Legacy AIFS monthly store lacks forecast_day: {path}")
@@ -278,12 +293,51 @@ def _open_legacy_aifs_monthly_intermediates(
         intermediate_reader_source="legacy_aifs_monthly",
         intermediate_reader_model=model_name,
         intermediate_reader_monthly_root=str(root),
+        intermediate_reader_years=json.dumps(list(requested_years) if requested_years else None),
+        intermediate_reader_months=json.dumps(list(requested_months) if requested_months else None),
         intermediate_reader_era5_daily_temperature_store=str(era5_daily_temperature_store),
         intermediate_reader_era5_hazard_store=str(era5_hazard_store),
         intermediate_reader_expected_forecast_days=json.dumps(list(expected_days)),
         intermediate_reader_missing_slices=json.dumps(list(missing_slices)),
     )
     return dataset
+
+
+def _legacy_aifs_monthly_stores(
+    root: Path,
+    *,
+    years: tuple[int, ...] | None,
+    months: tuple[int, ...] | None,
+) -> list[tuple[str, Path]]:
+    """Discover only the requested legacy monthly stores before opening Zarr."""
+    stores: list[tuple[str, Path]] = []
+    for path in sorted(root.glob("20??/aifs_ens_v2_heat_20????.zarr")):
+        match = _AIFS_MONTHLY_STORE_PATTERN.fullmatch(path.name)
+        if match is None:
+            continue
+        year, month = int(match.group("year")), int(match.group("month"))
+        if (years is not None and year not in years) or (months is not None and month not in months):
+            continue
+        stores.append((f"{year:04d}-{month:02d}", path))
+    return stores
+
+
+def _validate_years(years: Sequence[int] | None) -> tuple[int, ...] | None:
+    if years is None:
+        return None
+    parsed = tuple(sorted(set(int(year) for year in years)))
+    if not parsed:
+        raise ValueError("years must not be empty")
+    return parsed
+
+
+def _validate_months(months: Sequence[int] | None) -> tuple[int, ...] | None:
+    if months is None:
+        return None
+    parsed = tuple(sorted(set(int(month) for month in months)))
+    if not parsed or any(month < 1 or month > 12 for month in parsed):
+        raise ValueError("months must contain calendar month numbers 1 through 12")
+    return parsed
 
 
 def _canonicalize_legacy_aifs(

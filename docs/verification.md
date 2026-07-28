@@ -352,6 +352,9 @@ It lazily matches ERA5 temperature/event fields by `valid_date` and renames
 the result to the modern canonical schema (`forecast_temperature`,
 `observation_temperature`, `forecast_probability`, `observed_event`, and
 validity masks). All other model names use modern canonical case-cache stores.
+The legacy AIFS route defaults to JJAS, avoiding slow metadata opens for
+months outside the verification period; select a smaller subset with
+`--years` and `--months` before plotting.
 
 The reader discovers expected month/lead coverage from
 `inventory/reforecast_inventory.json` when available.  It can represent a

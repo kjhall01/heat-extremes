@@ -23,6 +23,7 @@ from heatextremes.verification.case_cache_reader import (
     DEFAULT_ERA5_DAILY_TEMPERATURE_STORE,
     DEFAULT_ERA5_HAZARD_STORE,
     DEFAULT_RESULTS_ROOT,
+    DEFAULT_VERIFICATION_MONTHS,
     open_model_intermediates,
 )
 
@@ -55,6 +56,19 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help="Expected zero-based forecast-day labels (default: manifest or 0 through 14).",
     )
+    parser.add_argument(
+        "--years",
+        type=int,
+        nargs="+",
+        help="Legacy AIFS years to open (ignored for modern cache models).",
+    )
+    parser.add_argument(
+        "--months",
+        type=int,
+        nargs="+",
+        default=DEFAULT_VERIFICATION_MONTHS,
+        help="Legacy AIFS months to open; default is JJAS, 6 7 8 9 (ignored for modern models).",
+    )
     return parser.parse_args()
 
 
@@ -67,6 +81,8 @@ def main() -> None:
         era5_daily_temperature_store=args.era5_daily_temperature_store,
         era5_hazard_store=args.era5_hazard_store,
         forecast_days=args.forecast_days,
+        years=args.years,
+        months=args.months,
     )
     print(dataset)
 
