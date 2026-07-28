@@ -254,6 +254,7 @@ def make_all_plots(
     *,
     reliability_forecast_days: Sequence[int] | None = None,
     regions: Sequence[str] | None = None,
+    allowed_output_roots: Sequence[Path] | None = None,
 ) -> None:
     """Create the complete aggregate-only plotting suite."""
     # Figures are overwriteable products, so keep them beneath one of the
@@ -262,7 +263,7 @@ def make_all_plots(
     if not result_dirs:
         raise ValueError("At least one model result directory is required")
     allowed = False
-    for result_dir in result_dirs:
+    for result_dir in (allowed_output_roots or result_dirs):
         try:
             assert_safe_result_path(output_directory, result_dir)
         except ValueError:

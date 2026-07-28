@@ -1,0 +1,57 @@
+# Copy this file to configs/verification/<model>.yaml for a model whose
+# monthly compact products have the same logical interface as AIFS:
+# initialization/time, forecast_day, latitude, longitude, valid_date, daily
+# mean temperature, and one probability (or deterministic 0/1 field) per
+# event.  Never point verification_results_root at a source-data directory.
+model:
+  name: example_model
+  display_name: Example model
+  adapter: compact_heat
+  ensemble: true
+  member_temperature_available: false
+
+paths:
+  compact_monthly_store_pattern: /net/monsoon/kylehall/FORECASTS/example_model/monthly/{year}/example_model_heat_{year}{month:02d}.zarr
+  era5_daily_temperature_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/daily/t2m_daily_mean.zarr
+  era5_hazard_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/hazards/t2m_daily_mean_q95_hazards.zarr
+  verification_results_root: /net/monsoon/kylehall/verification_results
+  # Optional selected quantiles for an ensemble.  Keep this beneath the
+  # results root; leave null when interval coverage is unavailable.
+  interval_quantile_file_pattern: null
+
+variables:
+  ensemble_mean_temperature: t2m_daily_mean_ensemble_mean
+  interval_quantile_temperature: ensemble_temperature_quantile
+  event_probabilities:
+    hot_day_q95: hot_day_q95_probability
+    heatwave_start_q95_2d: heatwave_start_q95_2d_probability
+    heatwave_start_q95_3d: heatwave_start_q95_3d_probability
+
+observations:
+  daily_temperature_variable: t2m_daily_mean
+  event_variables:
+    hot_day_q95: hot_day_q95
+    heatwave_start_q95_2d: heatwave_start_q95_2d
+    heatwave_start_q95_3d: heatwave_start_q95_3d
+  temperature_units: K
+
+selection:
+  years: [2022, 2023, 2024, 2025]
+  months: [6, 7, 8, 9]
+  forecast_days: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  map_forecast_days: [0, 5, 10, 13]
+
+chunking:
+  compact: {time: 1, forecast_day: 1, latitude: 180, longitude: 180}
+  observations: {time: 31, latitude: 180, longitude: 180}
+  quantiles: {initialization: 1, latitude: 180, longitude: 180}
+
+metrics:
+  probability_bins: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  interval_levels: [0.5, 0.8, 0.9, 0.95]
+
+regions:
+  file: regions.yaml
+
+output:
+  table_format: auto

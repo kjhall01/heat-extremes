@@ -105,13 +105,25 @@ class VerificationConfig:
         return configured if configured.is_absolute() else self.path.parent / configured
 
     def partitions(self) -> tuple[Partition, ...]:
+        explicit = self.data["selection"].get("partitions")
+        if explicit is not None:
+            parsed = {
+                Partition(int(item["year"]), int(item["month"]))
+                for item in explicit
+            }
+            if not parsed:
+                raise ValueError("selection.partitions cannot be empty")
+            invalid = [item for item in parsed if not 1 <= item.month <= 12]
+            if invalid:
+                raise ValueError(f"selection.partitions contains invalid months: {invalid}")
+            return tuple(sorted(parsed, key=lambda item: (item.year, item.month)))
         return tuple(Partition(year, month) for year in self.years for month in self.months)
 
     def assert_partition_selected(self, year: int, month: int) -> None:
-        if year not in self.years or month not in self.months:
+        if Partition(year, month) not in self.partitions():
             raise ValueError(
                 f"{year:04d}-{month:02d} is not in configured partitions "
-                f"(years={self.years}, months={self.months})"
+                f"({[item.label for item in self.partitions()]})"
             )
 
 
@@ -151,7 +163,21 @@ def load_config(
             data.setdefault("paths", {})[config_name] = value
 
     _validate_config(data)
-    canonical = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
+    region_config = Path(data["regions"]["file"])
+    region_path = region_config if region_config.is_absolute() else config_path.parent / region_config
+    if not region_path.is_file():
+        raise FileNotFoundError(f"Configured region file is missing: {region_path}")
+    # Region definitions affect every score. Include their content in the
+    # compatibility hash so a new region cannot silently resume an old partial.
+    canonical = json.dumps(
+        {
+            "config": data,
+            "region_file_sha256": hashlib.sha256(region_path.read_bytes()).hexdigest(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return VerificationConfig(
         path=config_path,
         data=data,

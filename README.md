@@ -38,6 +38,23 @@ figures—submit one command from the repository root:
 bash slurm/verification/submit_aifs_verification_workflow.sh
 ```
 
+## All standard raw reforecasts
+
+For standard stores laid out as
+`/net/monsoon/marchakitus/reforecast/forecasts_<model>/init_*.zarr`, inventory
+and submit each available JJAS model/month independently:
+
+```bash
+bash slurm/verification/submit_all_reforecasts_workflow.sh \
+  --reforecast-root /net/monsoon/marchakitus/reforecast \
+  --max-concurrent 1
+```
+
+The inventory scans only directory and store names. A source failure is
+recorded under the affected model's `failures/` directory and does not stop
+other models. Aggregate-only all-model figures are written under
+`/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results/_all_models/figures/`.
+
 Run the synthetic tests from a source checkout with:
 
 ```bash

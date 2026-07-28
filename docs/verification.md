@@ -22,6 +22,13 @@ mapping.  Core metrics do not refer to AIFS source variables.  A deterministic
 model has `ensemble: false`; interval metrics then explicitly receive an
 `unavailable` status rather than an invented ensemble.
 
+`standard_reforecast_raw` is a second adapter for standard raw directories
+such as `forecasts_<model>/init_*.zarr`. It reuses the verified local-solar
+daily-mean and q95/onset definitions directly from raw member temperatures,
+but never writes a reconstructed forecast, matched-ERA5 cube, or
+member-temperature cube. Only the current lead's quantities are reduced into
+verification sufficient statistics.
+
 ## Current input convention
 
 Raw AIFS ENS v2 stores use source variable `2t` and dimensions
@@ -91,6 +98,10 @@ then releases references.  It does not call `.persist()` and never makes a
 cross-lead Dask graph.  A failed task has no `completion.json`; existing lead
 rows are resumed safely.  A valid completion marker causes a rerun to skip
 unless `--overwrite` is supplied.
+
+Every bounded lead reduction runs within `dask.diagnostics.ProgressBar()`, so
+the active task's `.out` log displays Dask progress while data are computing.
+The contexts do not use `.persist()` or join metrics across leads.
 
 ```text
 verification_results/
@@ -183,7 +194,7 @@ python scripts/verification/plot_verification.py \
 # Later, overlay model directories without reopening any raw source:
 python scripts/verification/plot_model_comparison.py \
   --result-dirs /path/to/results/model_a /path/to/results/model_b \
-  --output-directory /path/to/comparison_figures
+  --output-directory /path/to/results/model_a/figures/comparison_with_model_b
 ```
 
 The figure suite covers RMSE/MAE/bias by all/hot/non-hot subset; event Brier
@@ -224,6 +235,51 @@ the source requires a different opening/alignment transformation.  Do not put
 model-specific names in deterministic, probabilistic, interval, or plotting
 modules.  Aggregate each model separately, then pass both result directories
 to the comparison plot command.
+
+For a compatible compact model, copy
+`configs/verification/compact_model_template.yaml`, set its paths and variable
+names, then submit its own dependency chain.  The `--years` and `--months`
+arguments must match the YAML selection exactly:
+
+```bash
+bash slurm/verification/submit_verification_workflow.sh \
+  --config configs/verification/my_model.yaml \
+  --model my_model \
+  --result-root /net/monsoon/kylehall/verification_results \
+  --years "2022 2023 2024 2025" \
+  --months "6 7 8 9" \
+  --max-concurrent 2
+```
+
+## Inventory and run all standard raw reforecasts
+
+Use the all-model launcher when raw model directories differ only by model
+name, for example
+`/net/monsoon/marchakitus/reforecast/forecasts_aurora_e2s/init_*.zarr`. It
+scans directory/store names only, writes its manifest and generated per-model
+YAML files under the results root, then submits one independent model/month
+task. Defaults select available 2022–2025 JJAS initializations:
+
+```bash
+bash slurm/verification/submit_all_reforecasts_workflow.sh \
+  --reforecast-root /net/monsoon/marchakitus/reforecast \
+  --result-root /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results \
+  --years "2022 2023 2024 2025" \
+  --months "6 7 8 9" \
+  --max-concurrent 1
+```
+
+Run it first with `--inventory-only` to inspect the generated manifest without
+submitting. The default source root is singular `reforecast`, following the
+provided example; use `--reforecast-root /net/monsoon/marchakitus/reforecasts`
+if the cluster directory is plural.
+
+Expected source/model failures are recorded in
+`<results_root>/<model>/failures/YYYY-MM.json`; their task exits cleanly so
+other models and tolerant aggregation continue. The aggregation status is in
+`inventory/aggregation_status.json`, and aggregate-only all-model comparison
+figures are written to `_all_models/figures/`. Start with one simultaneous raw
+task; raise `--max-concurrent` only after checking memory and filesystem load.
 
 ## Scientific points needing confirmation
 

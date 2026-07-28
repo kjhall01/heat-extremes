@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+from dask.diagnostics import ProgressBar
 
 from .config import VerificationConfig
 from .alignment import map_to_forecast_grid
@@ -464,21 +465,45 @@ def compute_partition(
                 continue
 
             print(f"{partition}: calculating bounded forecast day {forecast_day}", flush=True)
-            lead = adapter.lead(opened, forecast_day)
-            deterministic, probability, interval, reliability = _lead_statistics(
-                lead,
-                model=config.model_name,
-                partition=partition,
-                regions=regions_to_score,
-                probability_bins=config.probability_bins,
-                interval_levels=config.interval_levels,
-                interval_unavailable_reason=(
-                    "deterministic model does not provide ensemble intervals"
-                    if not adapter.capabilities.ensemble
+            # Every expensive Dask reduction remains scoped to this one lead.
+            # The progress bar is intentionally visible in Slurm stdout so a
+            # tailed log distinguishes active reduction from scheduler delay.
+            with ProgressBar():
+                lead = adapter.lead(opened, forecast_day)
+                # Do not hold graphs for every region at once.  The raw
+                # reforecast adapter can be considerably larger than compact
+                # AIFS products, and the resulting pandas rows are tiny.
+                regional_results = []
+                for region_name, region in regions_to_score.items():
+                    print(
+                        f"{partition}: forecast day {forecast_day}, region {region_name}",
+                        flush=True,
+                    )
+                    regional_results.append(
+                        _lead_statistics(
+                            lead,
+                            model=config.model_name,
+                            partition=partition,
+                            regions={region_name: region},
+                            probability_bins=config.probability_bins,
+                            interval_levels=config.interval_levels,
+                            interval_unavailable_reason=(
+                                "deterministic model does not provide ensemble intervals"
+                                if not adapter.capabilities.ensemble
+                                else None
+                            ),
+                            land_mask=land_mask,
+                        )
+                    )
+                deterministic = pd.concat([item[0] for item in regional_results], ignore_index=True)
+                probability = pd.concat([item[1] for item in regional_results], ignore_index=True)
+                interval = pd.concat([item[2] for item in regional_results], ignore_index=True)
+                reliability = pd.concat([item[3] for item in regional_results], ignore_index=True)
+                map_statistic = (
+                    _spatial_sufficient_statistics(lead).compute()
+                    if forecast_day in config.map_forecast_days
                     else None
-                ),
-                land_mask=land_mask,
-            )
+                )
             for stem, new in (
                 ("deterministic", deterministic),
                 ("probability", probability),
@@ -488,9 +513,9 @@ def compute_partition(
                 frames[stem] = _replace_lead_rows(frames[stem], new, forecast_day)
                 write_table_atomic(frames[stem], table_path(directory, stem, table_format))
 
-            if forecast_day in config.map_forecast_days:
-                _upsert_map(map_path, _spatial_sufficient_statistics(lead).compute())
-            del lead, deterministic, probability, interval, reliability
+            if map_statistic is not None:
+                _upsert_map(map_path, map_statistic)
+            del lead, regional_results, deterministic, probability, interval, reliability
             gc.collect()
     finally:
         adapter.close_partition(opened)

@@ -157,14 +157,21 @@ def open_aifs_month(
     month: int,
     *,
     chunks: dict[str, int] | None = None,
+    source_variable: str = SOURCE_VARIABLE,
+    require_member_dimension: bool = True,
 ) -> xr.Dataset:
-    """Open only AIFS stores initialized during one calendar month."""
+    """Open only standard-format stores initialized during one calendar month.
+
+    ``source_variable`` defaults to the historical AIFS name but is explicit
+    so the verified local-day construction can be reused for compatible
+    reforecast directories without copying this processor.
+    """
     paths = select_monthly_paths(root, year, month)
 
     def preprocess(ds: xr.Dataset) -> xr.Dataset:
-        if SOURCE_VARIABLE not in ds:
-            raise KeyError(f"AIFS store is missing {SOURCE_VARIABLE!r}.")
-        return ds[[SOURCE_VARIABLE]]
+        if source_variable not in ds:
+            raise KeyError(f"Forecast store is missing {source_variable!r}.")
+        return ds[[source_variable]]
 
     ds = xr.open_mfdataset(
         [str(path) for path in paths],
@@ -183,7 +190,7 @@ def open_aifs_month(
     )
 
     rename = {
-        SOURCE_VARIABLE: TEMPERATURE_NAME,
+        source_variable: TEMPERATURE_NAME,
         "lat": "latitude",
         "lon": "longitude",
     }
@@ -197,11 +204,12 @@ def open_aifs_month(
 
     required = {
         "time",
-        "number",
         "prediction_timedelta",
         "latitude",
         "longitude",
     }
+    if require_member_dimension:
+        required.add("number")
     missing = required.difference(ds.dims)
     if missing:
         raise ValueError(f"Opened AIFS data are missing dimensions: {sorted(missing)}")
