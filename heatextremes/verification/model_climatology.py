@@ -971,9 +971,9 @@ def compute_q95_band(
 ) -> dict[str, Any]:
     """Compute one non-overlapping longitude region of one final global Zarr.
 
-    Source stores are opened read-only.  Daily means are persisted only in the
-    worker's memory while its 13 lead q95 reductions are written directly into
-    the final global product.
+    Source stores are opened read-only. One forecast day's daily means are
+    persisted in worker memory at a time, then released after its q95 field is
+    written directly into the final global product.
     """
     model = _manifest_model(manifest, model_name)
     model_directory = Path(model["product_directory"])
@@ -1030,20 +1030,12 @@ def compute_q95_band(
             longitude_count=daily.sizes["longitude"],
             window_days=int(manifest["window_days"]),
         )
-        print(
-            f"Persisting in-memory daily ensemble means for {model_name} band {band_index}; "
-            "no daily intermediates are written to disk…",
-            flush=True,
-        )
-        with ProgressBar():
-            daily = daily.persist()
-
         longitude_region = slice(
             int(band["longitude_start_index"]), int(band["longitude_stop_index"])
         )
         for lead_index, forecast_day in enumerate(forecast_days):
             print(
-                f"Computing {model_name} band {band_index}, forecast day {forecast_day} "
+                f"Persisting {model_name} band {band_index}, forecast day {forecast_day} "
                 f"({lead_index + 1}/{len(forecast_days)})…",
                 flush=True,
             )
@@ -1053,37 +1045,57 @@ def compute_q95_band(
                 .sel(forecast_day=forecast_day)
                 .isel(longitude=0, drop=True)
             )
-            q95 = calendar_window_quantile(
-                lead_daily,
-                lead_dates,
-                window_days=int(manifest["window_days"]),
-                percentile=float(manifest["percentile"]),
-            ).expand_dims(forecast_day=[forecast_day])
-            # Deliberately omit coordinate variables: this task owns only its
-            # latitude/all-leads, longitude-region data chunks. It must never
-            # contend with another task over global coordinate metadata.
-            payload = xr.Dataset(
-                {
-                    MODEL_Q95_VARIABLE: (
-                        ("forecast_day", "dayofyear", "latitude", "longitude"),
-                        q95.data,
-                    ),
-                    SAMPLE_COUNT_VARIABLE: (
-                        ("forecast_day", "dayofyear", "longitude"),
-                        sample_counts[lead_index : lead_index + 1],
-                    ),
-                }
-            )
+            # Keeping all thirteen leads cached consumed too much memory on
+            # full-resolution bands. Persisting just this lead bounds the
+            # working set while retaining in-memory reuse during its q95
+            # reduction; nothing is written outside the final Zarr product.
             with ProgressBar():
-                payload.to_zarr(
-                    store,
-                    mode="r+",
-                    region={
-                        "forecast_day": slice(lead_index, lead_index + 1),
-                        "longitude": longitude_region,
-                    },
-                    consolidated=False,
+                lead_daily = lead_daily.persist()
+            q95: xr.DataArray | None = None
+            payload: xr.Dataset | None = None
+            try:
+                print(
+                    f"Computing {model_name} band {band_index}, forecast day {forecast_day} q95…",
+                    flush=True,
                 )
+                q95 = calendar_window_quantile(
+                    lead_daily,
+                    lead_dates,
+                    window_days=int(manifest["window_days"]),
+                    percentile=float(manifest["percentile"]),
+                ).expand_dims(forecast_day=[forecast_day])
+                # Deliberately omit coordinate variables: this task owns only
+                # its longitude-region data chunks. It must never contend with
+                # another task over global coordinate metadata.
+                payload = xr.Dataset(
+                    {
+                        MODEL_Q95_VARIABLE: (
+                            ("forecast_day", "dayofyear", "latitude", "longitude"),
+                            q95.data,
+                        ),
+                        SAMPLE_COUNT_VARIABLE: (
+                            ("forecast_day", "dayofyear", "longitude"),
+                            sample_counts[lead_index : lead_index + 1],
+                        ),
+                    }
+                )
+                with ProgressBar():
+                    payload.to_zarr(
+                        store,
+                        mode="r+",
+                        region={
+                            "forecast_day": slice(lead_index, lead_index + 1),
+                            "longitude": longitude_region,
+                        },
+                        consolidated=False,
+                    )
+            finally:
+                # The persisted lead lives only in this task's Dask cache;
+                # freeing it before the next lead keeps the peak memory small.
+                del payload
+                del q95
+                del lead_daily
+                gc.collect()
 
         write_json_atomic(
             {
