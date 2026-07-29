@@ -769,8 +769,20 @@ def _valid_band_marker(
 
 
 def _open_raw_ensemble_mean(model: dict[str, Any]) -> tuple[xr.Dataset, xr.DataArray]:
-    """Open raw source stores read-only and reduce ensemble members immediately."""
+    """Open raw stores sequentially and reduce ensemble members immediately.
+
+    A historical climatology can contain thousands of single-init Zarr stores.
+    ``parallel=True`` makes Dask materialize their metadata opens concurrently,
+    which can exceed a batch task's memory before any forecast values are read.
+    Keep the catalogue construction sequential; temperature chunks stay lazy.
+    """
     variable = str(model["source_temperature_variable"])
+    source_stores = [str(path) for path in model["source_stores"]]
+    print(
+        f"Opening {len(source_stores)} raw Zarr metadata stores sequentially; "
+        "forecast-temperature chunks remain lazy…",
+        flush=True,
+    )
 
     def preprocess(dataset: xr.Dataset) -> xr.Dataset:
         if variable not in dataset:
@@ -778,13 +790,13 @@ def _open_raw_ensemble_mean(model: dict[str, Any]) -> tuple[xr.Dataset, xr.DataA
         return dataset[[variable]]
 
     raw = xr.open_mfdataset(
-        [str(path) for path in model["source_stores"]],
+        source_stores,
         engine="zarr",
         combine="nested",
         concat_dim="time",
         preprocess=preprocess,
         chunks={"time": 1},
-        parallel=True,
+        parallel=False,
         data_vars="minimal",
         coords="minimal",
         compat="override",
@@ -792,6 +804,7 @@ def _open_raw_ensemble_mean(model: dict[str, Any]) -> tuple[xr.Dataset, xr.DataA
         combine_attrs="override",
         consolidated=None,
     )
+    print("Raw metadata catalogue ready; constructing local-solar daily means lazily…", flush=True)
     temperature = _canonical_temperature(raw, variable).sortby("prediction_timedelta")
     temperature = temperature.chunk(
         {
