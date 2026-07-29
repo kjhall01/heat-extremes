@@ -3,10 +3,10 @@
 
 The audit is metadata-only: it reads directory entries, Zarr metadata files,
 and completion markers but never opens temperature data chunks.  A modern
-forecast-day store is counted as complete only when its partition's
-``completion.json`` commits the requested lead range and the store has a
-``.zmetadata`` file.  This lets a completed 0--14 partition satisfy an audit
-limited to days 0--12, while still flagging partial or uncommitted writes.
+forecast-day store is usable by the intermediate reader when it has a
+``.zmetadata`` file, so that is what determines slice completeness.  A
+partition completion marker is reported separately because older otherwise
+usable cache products can predate the current marker schema.
 """
 
 from __future__ import annotations
@@ -114,19 +114,21 @@ def audit_modern_model(
     required_stores = {f"forecast_day_{day:03d}.zarr" for day in forecast_days}
     complete: list[tuple[str, int]] = []
     missing: list[tuple[str, int]] = []
-    uncommitted_or_invalid: list[tuple[str, int]] = []
+    invalid: list[tuple[str, int]] = []
+    committed_partitions = 0
 
     for partition in partitions:
         directory = results_root / model / "case_cache" / partition
         committed = completion_commits_required_leads(
             directory, model=model, partition=partition, required_stores=required_stores
         )
+        committed_partitions += int(committed)
         for forecast_day in forecast_days:
             store = directory / f"forecast_day_{forecast_day:03d}.zarr"
             if not store.is_dir():
                 missing.append((partition, forecast_day))
-            elif not (store / ".zmetadata").is_file() or not committed:
-                uncommitted_or_invalid.append((partition, forecast_day))
+            elif not (store / ".zmetadata").is_file():
+                invalid.append((partition, forecast_day))
             else:
                 complete.append((partition, forecast_day))
 
@@ -139,11 +141,13 @@ def audit_modern_model(
             "expected_leads": f"{forecast_days[0]}–{forecast_days[-1]}",
             "complete_case_cache_slices": len(complete),
             "missing_slices": len(missing),
-            "uncommitted_or_invalid_slices": len(uncommitted_or_invalid),
+            "invalid_slices": len(invalid),
+            "committed_partitions": committed_partitions,
+            "partitions_without_valid_completion_marker": len(partitions) - committed_partitions,
             "cache_coverage_%": round(100 * len(complete) / expected, 1) if expected else float("nan"),
         },
         missing,
-        uncommitted_or_invalid,
+        invalid,
     )
 
 
@@ -179,7 +183,9 @@ def audit_legacy_aifs(
             "expected_leads": f"{forecast_days[0]}–{forecast_days[-1]}",
             "complete_case_cache_slices": len(complete),
             "missing_slices": len(missing),
-            "uncommitted_or_invalid_slices": len(invalid),
+            "invalid_slices": len(invalid),
+            "committed_partitions": "n/a",
+            "partitions_without_valid_completion_marker": "n/a",
             "cache_coverage_%": round(100 * len(complete) / expected, 1) if expected else float("nan"),
         },
         missing,
@@ -221,7 +227,7 @@ def main() -> None:
             if missing:
                 print(f"\n{model} missing: {summarize_details(missing)}")
             if invalid:
-                print(f"\n{model} uncommitted or invalid: {summarize_details(invalid)}")
+                print(f"\n{model} invalid Zarr metadata: {summarize_details(invalid)}")
     if args.csv:
         args.csv.parent.mkdir(parents=True, exist_ok=True)
         table.to_csv(args.csv, index=False)
