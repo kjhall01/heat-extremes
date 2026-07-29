@@ -99,7 +99,7 @@ def main() -> None:
     print(f"Global products: {output_directory}/<model>/q95.zarr")
     print(f"Array tasks: {manifest['task_count']}")
     print("Raw source stores: read only")
-    print("Daily intermediate storage: none (in-memory only within each array task)")
+    print("Daily staging: temporary per-band Zarr; removed after each successful q95 write")
 
 
 if __name__ == "__main__":

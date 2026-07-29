@@ -38,6 +38,11 @@ MODEL_Q95_OUTPUT_CHUNKS = {
     "latitude": 90,
     "longitude": 90,
 }
+DAILY_WORK_VARIABLE = "daily_ensemble_mean_temperature"
+# This bounds raw-source metadata and Dask graph construction. The staged
+# daily field is only one band and is removed after its final q95 output is
+# committed; it is never a global historical forecast cache.
+RAW_STORE_BATCH_SIZE = 16
 
 
 @dataclass(frozen=True)
@@ -735,7 +740,9 @@ def build_q95_workflow_manifest(
         "task_count": len(tasks),
         "tasks": tasks,
         "raw_source_write_policy": "read_only",
-        "daily_intermediate_storage": "none; daily means exist only in task memory",
+        "daily_intermediate_storage": (
+            "temporary per-band daily means; removed after that band writes its final q95 field"
+        ),
     }
     return manifest
 
@@ -768,7 +775,9 @@ def _valid_band_marker(
     )
 
 
-def _open_raw_ensemble_mean(model: dict[str, Any]) -> tuple[xr.Dataset, xr.DataArray]:
+def _open_raw_ensemble_mean(
+    model: dict[str, Any], source_stores: Iterable[str] | None = None
+) -> tuple[xr.Dataset, xr.DataArray]:
     """Open raw stores sequentially and reduce ensemble members immediately.
 
     A historical climatology can contain thousands of single-init Zarr stores.
@@ -777,7 +786,10 @@ def _open_raw_ensemble_mean(model: dict[str, Any]) -> tuple[xr.Dataset, xr.DataA
     Keep the catalogue construction sequential; temperature chunks stay lazy.
     """
     variable = str(model["source_temperature_variable"])
-    source_stores = [str(path) for path in model["source_stores"]]
+    selected_stores = model["source_stores"] if source_stores is None else source_stores
+    source_stores = [str(path) for path in selected_stores]
+    if not source_stores:
+        raise ValueError("At least one raw source store is required")
     print(
         f"Opening {len(source_stores)} raw Zarr metadata stores sequentially; "
         "forecast-temperature chunks remain lazy…",
@@ -879,6 +891,147 @@ def _local_solar_daily_mean_band(
             f"Longitude band {band['index']} lacks requested local-solar forecast day(s): {absent}"
         )
     return daily.sel(forecast_day=list(forecast_days)).astype(np.float32)
+
+
+def q95_daily_work_store(model_directory: Path, band_index: int) -> Path:
+    """Return the temporary, per-band daily-mean store used for bounded work."""
+    return model_directory / ".q95_work" / f"band_{band_index:02d}_daily.zarr"
+
+
+def q95_daily_work_marker(model_directory: Path, band_index: int) -> Path:
+    """Return the small marker proving a temporary daily store is complete."""
+    return model_directory / ".q95_work" / f"band_{band_index:02d}_daily_complete.json"
+
+
+def _valid_daily_work_marker(
+    marker: Path,
+    work_store: Path,
+    *,
+    manifest_sha256: str,
+    band_index: int,
+) -> bool:
+    return work_store.is_dir() and _valid_band_marker(
+        marker, manifest_sha256=manifest_sha256, band_index=band_index
+    )
+
+
+def _clear_zarr_encodings(dataset: xr.Dataset) -> xr.Dataset:
+    """Avoid carrying source-store codec instructions into a temporary v2 store."""
+    output = dataset.copy()
+    for variable in output.variables.values():
+        variable.encoding.clear()
+    return output
+
+
+def _zarr_v2_arguments() -> dict[str, int]:
+    """Use the correct xarray keyword for Zarr v2 across xarray releases."""
+    keyword = "zarr_format" if "zarr_format" in inspect.signature(xr.Dataset.to_zarr).parameters else "zarr_version"
+    return {keyword: 2}
+
+
+def _materialize_daily_work_store(
+    manifest: dict[str, Any],
+    *,
+    model: dict[str, Any],
+    band: dict[str, Any],
+    forecast_days: tuple[int, ...],
+    overwrite: bool,
+) -> tuple[Path, Path]:
+    """Stage bounded raw batches into a removable per-band daily Zarr store."""
+    model_directory = Path(model["product_directory"])
+    band_index = int(band["index"])
+    work_store = q95_daily_work_store(model_directory, band_index)
+    work_marker = q95_daily_work_marker(model_directory, band_index)
+    result_root = Path(manifest["result_root"])
+    manifest_sha256 = str(manifest["manifest_sha256"])
+    if not overwrite and _valid_daily_work_marker(
+        work_marker,
+        work_store,
+        manifest_sha256=manifest_sha256,
+        band_index=band_index,
+    ):
+        print(f"Reusing complete temporary daily store for band {band_index}…", flush=True)
+        return work_store, work_marker
+
+    if work_store.exists():
+        print(f"Removing incomplete temporary daily store: {work_store}", flush=True)
+        remove_result_path(work_store, result_root)
+    work_marker.unlink(missing_ok=True)
+
+    source_stores = [str(path) for path in model["source_stores"]]
+    batch_count = (len(source_stores) + RAW_STORE_BATCH_SIZE - 1) // RAW_STORE_BATCH_SIZE
+    for batch_index, start in enumerate(range(0, len(source_stores), RAW_STORE_BATCH_SIZE), start=1):
+        batch_paths = source_stores[start : start + RAW_STORE_BATCH_SIZE]
+        print(
+            f"Staging {model['model']} band {band_index}: raw batch {batch_index}/{batch_count} "
+            f"({len(batch_paths)} initializations)…",
+            flush=True,
+        )
+        raw: xr.Dataset | None = None
+        temperature: xr.DataArray | None = None
+        daily: xr.DataArray | None = None
+        daily_dataset: xr.Dataset | None = None
+        try:
+            raw, temperature = _open_raw_ensemble_mean(model, batch_paths)
+            daily = _local_solar_daily_mean_band(
+                temperature, band=band, forecast_days=forecast_days
+            ).chunk(
+                {
+                    "time": 1,
+                    "forecast_day": 1,
+                    "latitude": MODEL_Q95_OUTPUT_CHUNKS["latitude"],
+                    "longitude": MODEL_Q95_OUTPUT_CHUNKS["longitude"],
+                }
+            )
+            daily_dataset = _clear_zarr_encodings(
+                daily.rename(DAILY_WORK_VARIABLE).to_dataset()
+            )
+            write_arguments: dict[str, Any] = {
+                "mode": "w" if start == 0 else "a",
+                "consolidated": False,
+                **_zarr_v2_arguments(),
+            }
+            if start:
+                write_arguments["append_dim"] = "time"
+            with ProgressBar():
+                daily_dataset.to_zarr(work_store, **write_arguments)
+        finally:
+            if raw is not None:
+                raw.close()
+            del daily_dataset
+            del daily
+            del temperature
+            del raw
+            gc.collect()
+
+    zarr.consolidate_metadata(str(work_store))
+    write_json_atomic(
+        {
+            "status": "complete",
+            "created_at": now_utc(),
+            "manifest_sha256": manifest_sha256,
+            "model": model["model"],
+            "band_index": band_index,
+            "source_store_count": len(source_stores),
+            "raw_store_batch_size": RAW_STORE_BATCH_SIZE,
+            "description": "Temporary per-band daily ensemble means; removed after final q95 write.",
+        },
+        work_marker,
+    )
+    return work_store, work_marker
+
+
+def _remove_daily_work_store(
+    manifest: dict[str, Any], *, work_store: Path, work_marker: Path
+) -> None:
+    """Remove the temporary staging store after a successful final write."""
+    remove_result_path(work_store, Path(manifest["result_root"]))
+    work_marker.unlink(missing_ok=True)
+    try:
+        work_store.parent.rmdir()
+    except OSError:
+        # Other bands can still be staging beneath this shared directory.
+        pass
 
 
 def _window_sample_counts(
@@ -1010,26 +1163,24 @@ def compute_q95_band(
         marker.unlink(missing_ok=True)
 
     forecast_days = tuple(int(day) for day in manifest["forecast_days"])
-    raw: xr.Dataset | None = None
     daily: xr.DataArray | None = None
+    daily_work_dataset: xr.Dataset | None = None
     try:
         print(
-            f"Opening {model_name} raw source read-only for longitude band {band_index} "
+            f"Staging {model_name} raw source read-only for longitude band {band_index} "
             f"[{band['longitude_start']}, {band['longitude_stop']})…",
             flush=True,
         )
-        raw, temperature = _open_raw_ensemble_mean(model)
-        expected_longitude = np.asarray(model["longitude"])[
-            int(band["longitude_start_index"]) : int(band["longitude_stop_index"])
-        ]
-        actual_longitude = np.asarray(temperature["longitude"].values)[
-            int(band["longitude_start_index"]) : int(band["longitude_stop_index"])
-        ]
-        if not np.array_equal(actual_longitude, expected_longitude):
-            raise ValueError("Raw longitude coordinates differ from the global product schema")
-        daily = _local_solar_daily_mean_band(
-            temperature, band=band, forecast_days=forecast_days
-        ).chunk(
+        work_store, work_marker = _materialize_daily_work_store(
+            manifest,
+            model=model,
+            band=band,
+            forecast_days=forecast_days,
+            overwrite=overwrite,
+        )
+        print("Opening bounded temporary daily means for q95 calculation…", flush=True)
+        daily_work_dataset = xr.open_zarr(work_store, consolidated=True, chunks={})
+        daily = daily_work_dataset[DAILY_WORK_VARIABLE].chunk(
             {
                 "time": -1,
                 "forecast_day": 1,
@@ -1037,6 +1188,12 @@ def compute_q95_band(
                 "longitude": MODEL_Q95_OUTPUT_CHUNKS["longitude"],
             }
         )
+        expected_longitude = np.asarray(model["longitude"])[
+            int(band["longitude_start_index"]) : int(band["longitude_stop_index"])
+        ]
+        actual_longitude = np.asarray(daily["longitude"].values)
+        if not np.array_equal(actual_longitude, expected_longitude):
+            raise ValueError("Temporary daily longitude coordinates differ from the product schema")
         sample_counts = _window_sample_counts(
             daily["valid_date"],
             forecast_days=forecast_days,
@@ -1110,6 +1267,13 @@ def compute_q95_band(
                 del lead_daily
                 gc.collect()
 
+        del daily
+        daily = None
+        gc.collect()
+        if daily_work_dataset is not None:
+            daily_work_dataset.close()
+            daily_work_dataset = None
+        _remove_daily_work_store(manifest, work_store=work_store, work_marker=work_marker)
         write_json_atomic(
             {
                 "status": "complete",
@@ -1120,7 +1284,7 @@ def compute_q95_band(
                 "longitude_start_index": int(band["longitude_start_index"]),
                 "longitude_stop_index": int(band["longitude_stop_index"]),
                 "source_store_count": int(model["source_store_count"]),
-                "daily_intermediate_storage": "none",
+                "daily_intermediate_storage": "temporary per-band daily Zarr removed after success",
             },
             marker,
         )
@@ -1131,8 +1295,8 @@ def compute_q95_band(
         # the shared filesystem.
         del daily
         gc.collect()
-        if raw is not None:
-            raw.close()
+        if daily_work_dataset is not None:
+            daily_work_dataset.close()
 
 
 def finalize_q95_workflow(manifest: dict[str, Any]) -> list[dict[str, Any]]:

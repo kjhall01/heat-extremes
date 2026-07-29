@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+import heatextremes.verification.model_climatology as model_climatology
 from heatextremes.verification.model_climatology import (
     DAY_OF_YEAR_COUNT,
     MODEL_Q95_VARIABLE,
@@ -99,7 +100,9 @@ def test_calendar_window_quantile_is_circular_and_uses_global_day_labels() -> No
     assert np.isclose(result.sel(dayofyear=1).item(), 2.9)
 
 
-def test_q95_band_tasks_write_one_final_global_store_without_daily_files(tmp_path: Path) -> None:
+def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
+    tmp_path: Path, monkeypatch
+) -> None:
     raw_directory = tmp_path / "raw"
     raw_directory.mkdir()
     longitude = np.asarray([20.0, 80.0, 150.0, 200.0, 260.0, 320.0])
@@ -153,6 +156,8 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(tmp_pat
     )
 
     assert manifest["task_count"] == 6
+    # Exercise append-mode temporary staging rather than only the first batch.
+    monkeypatch.setattr(model_climatology, "RAW_STORE_BATCH_SIZE", 1)
     for task in manifest["tasks"]:
         assert compute_q95_band(
             manifest, model_name=task["model"], band_index=task["band_index"]
@@ -169,4 +174,4 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(tmp_pat
     finally:
         dataset.close()
     assert (product_directory / "completion.json").is_file()
-    assert not list(product_directory.glob("*daily*"))
+    assert not (product_directory / ".q95_work").exists()

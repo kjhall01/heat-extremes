@@ -1,6 +1,7 @@
 #!/bin/bash
 # One non-overlapping longitude region of one final global model q95 Zarr.
-# Raw reforecast stores are opened read-only. No daily forecast cache is made.
+# Raw reforecast stores are opened read-only. A bounded, per-band temporary
+# daily-mean Zarr is removed after its final q95 output is complete.
 # The launcher supplies the precise array size and conservative concurrency.
 #SBATCH --job-name=model_q95
 #SBATCH --partition=general
@@ -33,7 +34,7 @@ echo "Hostname: $(hostname)"
 echo "Start: $(date --iso-8601=seconds)"
 echo "Manifest: ${MANIFEST}"
 echo "Raw source policy: read only"
-echo "Daily intermediate policy: in-memory only"
+echo "Daily staging policy: temporary per-band store, removed after successful q95 write"
 
 # Some nodes inherit a non-contiguous affinity mask that makes Slurm's default
 # CPU binding fail before Python starts. The task is explicitly thread-limited.
