@@ -18,8 +18,11 @@ Options:
   --max-forecast-day N         inclusive zero-based cap; default: 12
   --window-days N              odd calendar-day window; default: 15
   --percentile P               default: 95
-  --max-concurrent N           simultaneous q95 lead tasks; default: 36
+  --max-concurrent N           simultaneous q95 Slurm tasks; default: 24
   --stage-max-concurrent N     simultaneous raw-read staging tasks; default: 12
+  --quantile-tasks-per-job N   q95 calculations per Slurm task; default: 2
+  --submit-leads-only          do not submit staging; use existing staged band stores
+  --staging-job-id ID          optional afterok dependency for --submit-leads-only
   --overwrite                  replace existing final q95 products, never raw stores
   --initialize-only            create/reuse final schemas and manifest but do not submit jobs
 EOF
@@ -34,10 +37,13 @@ MONTHS_TEXT="1 2 3 4 5 6 7 8 9 10 11 12"
 MAX_FORECAST_DAY=12
 WINDOW_DAYS=15
 PERCENTILE=95
-MAX_CONCURRENT=36
+MAX_CONCURRENT=24
 STAGE_MAX_CONCURRENT=12
+QUANTILE_TASKS_PER_JOB=2
 OVERWRITE_VALUE=0
 INITIALIZE_ONLY=0
+SUBMIT_LEADS_ONLY=0
+STAGING_JOB_ID=""
 
 while (( $# )); do
     case "$1" in
@@ -52,6 +58,9 @@ while (( $# )); do
         --percentile) PERCENTILE="$2"; shift 2 ;;
         --max-concurrent) MAX_CONCURRENT="$2"; shift 2 ;;
         --stage-max-concurrent) STAGE_MAX_CONCURRENT="$2"; shift 2 ;;
+        --quantile-tasks-per-job) QUANTILE_TASKS_PER_JOB="$2"; shift 2 ;;
+        --submit-leads-only) SUBMIT_LEADS_ONLY=1; shift ;;
+        --staging-job-id) STAGING_JOB_ID="$2"; shift 2 ;;
         --overwrite) OVERWRITE_VALUE=1; shift ;;
         --initialize-only) INITIALIZE_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -67,8 +76,12 @@ if [[ ! -x "${PYTHON}" || ! -f "${BUILD_SCRIPT}" || ! -f "${SLURM_DIRECTORY}/sub
     echo "Python, q95 workflow scripts, or Slurm scripts are unavailable" >&2
     exit 2
 fi
-if (( MAX_CONCURRENT < 1 || STAGE_MAX_CONCURRENT < 1 || MAX_FORECAST_DAY < 0 || MAX_FORECAST_DAY > 14 )); then
-    echo "concurrency values must be positive and --max-forecast-day must be within 0--14" >&2
+if (( MAX_CONCURRENT < 1 || MAX_CONCURRENT > 24 || STAGE_MAX_CONCURRENT < 1 || STAGE_MAX_CONCURRENT > 24 || QUANTILE_TASKS_PER_JOB < 1 || MAX_FORECAST_DAY < 0 || MAX_FORECAST_DAY > 14 )); then
+    echo "concurrency values must be within the general-QOS limit of 24 and --max-forecast-day must be within 0--14" >&2
+    exit 2
+fi
+if (( INITIALIZE_ONLY && SUBMIT_LEADS_ONLY )); then
+    echo "--initialize-only and --submit-leads-only cannot be used together" >&2
     exit 2
 fi
 
@@ -103,31 +116,53 @@ fi
     --years "${YEARS[@]}" --months "${MONTHS[@]}" \
     --max-forecast-day "${MAX_FORECAST_DAY}" \
     --window-days "${WINDOW_DAYS}" --percentile "${PERCENTILE}" \
+    --quantile-tasks-per-job "${QUANTILE_TASKS_PER_JOB}" \
     "${MODEL_ARGS[@]}" "${OVERWRITE_ARGS[@]}"
 
-read -r STAGING_TASK_COUNT QUANTILE_TASK_COUNT < <("${PYTHON}" -c 'import json, sys; payload=json.load(open(sys.argv[1])); print(payload["staging_task_count"], payload["quantile_task_count"])' "${MANIFEST}")
-if (( STAGING_TASK_COUNT == 0 || QUANTILE_TASK_COUNT == 0 )); then
+read -r STAGING_TASK_COUNT QUANTILE_TASK_COUNT QUANTILE_JOB_COUNT < <("${PYTHON}" -c 'import json, sys; payload=json.load(open(sys.argv[1])); print(payload["staging_task_count"], payload["quantile_task_count"], payload["quantile_job_count"])' "${MANIFEST}")
+if (( STAGING_TASK_COUNT == 0 || QUANTILE_TASK_COUNT == 0 || QUANTILE_JOB_COUNT == 0 )); then
     echo "No q95 staging or lead tasks were initialized" >&2
     exit 2
 fi
 if (( INITIALIZE_ONLY )); then
-    echo "Initialized only: ${MANIFEST} (${STAGING_TASK_COUNT} staging tasks; ${QUANTILE_TASK_COUNT} lead tasks)"
+    echo "Initialized only: ${MANIFEST} (${STAGING_TASK_COUNT} staging tasks; ${QUANTILE_TASK_COUNT} lead calculations in ${QUANTILE_JOB_COUNT} Slurm tasks)"
     exit 0
 fi
 
 EXPORT_ARGUMENT="--export=ALL,REPOSITORY_ROOT=${REPOSITORY_ROOT},MODEL_Q95_MANIFEST=${MANIFEST},MODEL_Q95_OVERWRITE=${OVERWRITE_VALUE}"
-stage_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --array="0-$((STAGING_TASK_COUNT - 1))%${STAGE_MAX_CONCURRENT}" \
-    --output="${RESULT_ROOT}/logs/model_q95_stage_%A_%a.out" --error="${RESULT_ROOT}/logs/model_q95_stage_%A_%a.err" \
-    "${SLURM_DIRECTORY}/submit_model_temperature_q95_stage.sbatch")"
-quantile_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterok:${stage_job}" --array="0-$((QUANTILE_TASK_COUNT - 1))%${MAX_CONCURRENT}" \
+LEAD_DEPENDENCY=()
+stage_job=""
+if (( SUBMIT_LEADS_ONLY )); then
+    if [[ -n "${STAGING_JOB_ID}" ]]; then
+        LEAD_DEPENDENCY=(--dependency="afterok:${STAGING_JOB_ID}")
+    fi
+else
+    stage_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --array="0-$((STAGING_TASK_COUNT - 1))%${STAGE_MAX_CONCURRENT}" \
+        --output="${RESULT_ROOT}/logs/model_q95_stage_%A_%a.out" --error="${RESULT_ROOT}/logs/model_q95_stage_%A_%a.err" \
+        "${SLURM_DIRECTORY}/submit_model_temperature_q95_stage.sbatch")"
+    LEAD_DEPENDENCY=(--dependency="afterok:${stage_job}")
+fi
+quantile_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" "${LEAD_DEPENDENCY[@]}" --array="0-$((QUANTILE_JOB_COUNT - 1))%${MAX_CONCURRENT}" \
     --output="${RESULT_ROOT}/logs/model_q95_lead_%A_%a.out" --error="${RESULT_ROOT}/logs/model_q95_lead_%A_%a.err" \
     "${SLURM_DIRECTORY}/submit_model_temperature_q95_lead.sbatch")"
 finalize_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterok:${quantile_job}" \
     --output="${RESULT_ROOT}/logs/model_q95_finalize_%j.out" --error="${RESULT_ROOT}/logs/model_q95_finalize_%j.err" \
     "${SLURM_DIRECTORY}/finalize_model_temperature_q95_workflow.sbatch")"
 
-printf 'Manifest: %s (%s staging tasks; %s lead tasks)\n' "${MANIFEST}" "${STAGING_TASK_COUNT}" "${QUANTILE_TASK_COUNT}"
-printf 'Submitted raw-read staging array: %s\n' "${stage_job}"
-printf 'Submitted lead-q95 array: %s (afterok:%s; throttle=%s)\n' "${quantile_job}" "${stage_job}" "${MAX_CONCURRENT}"
+printf 'Manifest: %s (%s staging tasks; %s lead calculations in %s Slurm tasks)\n' "${MANIFEST}" "${STAGING_TASK_COUNT}" "${QUANTILE_TASK_COUNT}" "${QUANTILE_JOB_COUNT}"
+if [[ -n "${stage_job}" ]]; then
+    printf 'Submitted raw-read staging array: %s\n' "${stage_job}"
+elif [[ -n "${STAGING_JOB_ID}" ]]; then
+    printf 'Using existing staging array: %s\n' "${STAGING_JOB_ID}"
+else
+    printf 'Using already-complete staged band stores\n'
+fi
+printf 'Submitted lead-q95 array: %s (throttle=%s)\n' "${quantile_job}" "${MAX_CONCURRENT}"
 printf 'Submitted q95 finalizer: %s (afterok:%s)\n' "${finalize_job}" "${quantile_job}"
-printf 'Monitor: squeue -u "%s" -j %s,%s,%s\n' "${USER}" "${stage_job}" "${quantile_job}" "${finalize_job}"
+if [[ -n "${stage_job}" ]]; then
+    printf 'Monitor: squeue -u "%s" -j %s,%s,%s\n' "${USER}" "${stage_job}" "${quantile_job}" "${finalize_job}"
+elif [[ -n "${STAGING_JOB_ID}" ]]; then
+    printf 'Monitor: squeue -u "%s" -j %s,%s,%s\n' "${USER}" "${STAGING_JOB_ID}" "${quantile_job}" "${finalize_job}"
+else
+    printf 'Monitor: squeue -u "%s" -j %s,%s\n' "${USER}" "${quantile_job}" "${finalize_job}"
+fi

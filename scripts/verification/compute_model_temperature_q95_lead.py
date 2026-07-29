@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute one staged model longitude-band and forecast-day q95 field."""
+"""Compute one small group of staged model-band-lead q95 fields."""
 
 from __future__ import annotations
 
@@ -24,19 +24,22 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-    tasks = manifest.get("quantile_tasks", [])
-    if not 0 <= args.task_index < len(tasks):
-        raise IndexError(f"task index {args.task_index} is outside 0 through {len(tasks) - 1}")
-    task = tasks[args.task_index]
-    print(
-        compute_q95_lead(
-            manifest,
-            model_name=str(task["model"]),
-            band_index=int(task["band_index"]),
-            forecast_day=int(task["forecast_day"]),
-            overwrite=args.overwrite,
+    lead_tasks = manifest.get("quantile_tasks", [])
+    job_tasks = manifest.get("quantile_job_tasks", [])
+    if not 0 <= args.task_index < len(job_tasks):
+        raise IndexError(f"task index {args.task_index} is outside 0 through {len(job_tasks) - 1}")
+    for lead_task_index in job_tasks[args.task_index]["lead_task_indices"]:
+        task = lead_tasks[int(lead_task_index)]
+        print(
+            compute_q95_lead(
+                manifest,
+                model_name=str(task["model"]),
+                band_index=int(task["band_index"]),
+                forecast_day=int(task["forecast_day"]),
+                overwrite=args.overwrite,
+            ),
+            flush=True,
         )
-    )
 
 
 if __name__ == "__main__":

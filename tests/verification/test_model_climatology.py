@@ -161,6 +161,7 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
     assert manifest["task_count"] == 6
     assert manifest["staging_task_count"] == 6
     assert manifest["quantile_task_count"] == 12
+    assert manifest["quantile_job_count"] == 6
     # Exercise append-mode temporary staging rather than only the first batch.
     monkeypatch.setattr(model_climatology, "RAW_STORE_BATCH_SIZE", 1)
     first_task = manifest["tasks"][0]

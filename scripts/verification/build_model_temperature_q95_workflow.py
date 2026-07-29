@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-days", type=int, default=15)
     parser.add_argument("--percentile", type=float, default=95.0)
     parser.add_argument(
+        "--quantile-tasks-per-job",
+        type=int,
+        default=2,
+        help="Independent model-band-lead q95 calculations run serially in one Slurm task.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace existing final q95 product(s) only; raw stores are always read-only.",
@@ -93,12 +99,17 @@ def main() -> None:
         percentile=args.percentile,
         models=args.models,
         overwrite=args.overwrite,
+        quantile_tasks_per_job=args.quantile_tasks_per_job,
     )
     write_json_atomic(manifest, manifest_path)
     print(f"Manifest: {manifest_path}")
     print(f"Global products: {output_directory}/<model>/q95.zarr")
     print(f"Staging array tasks: {manifest['staging_task_count']}")
-    print(f"Quantile array tasks: {manifest['quantile_task_count']}")
+    print(
+        f"Quantile calculations: {manifest['quantile_task_count']} "
+        f"({manifest['quantile_job_count']} Slurm tasks × "
+        f"{manifest['quantile_tasks_per_job']} calculation(s) each)"
+    )
     print("Raw source stores: read only")
     print("Daily staging: temporary per-band Zarr; removed only after all lead q95 writes")
 

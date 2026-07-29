@@ -556,6 +556,7 @@ def build_q95_workflow_manifest(
     percentile: float,
     models: Iterable[str] | None = None,
     overwrite: bool = False,
+    quantile_tasks_per_job: int = 2,
 ) -> dict[str, Any]:
     """Create one empty global output per ready model and a compact task manifest.
 
@@ -574,6 +575,8 @@ def build_q95_workflow_manifest(
         raise ValueError("window_days must be a positive odd integer")
     if not 0 < percentile < 100:
         raise ValueError("percentile must be strictly between 0 and 100")
+    if quantile_tasks_per_job < 1:
+        raise ValueError("quantile_tasks_per_job must be positive")
 
     preflight_years = tuple(int(year) for year in preflight.get("requested_years", ()))
     preflight_months = tuple(int(month) for month in preflight.get("requested_months", ()))
@@ -746,6 +749,10 @@ def build_q95_workflow_manifest(
         for spec in model_specs
         for band in spec["longitude_bands"]
     ]
+    quantile_job_tasks = [
+        {"lead_task_indices": list(range(start, min(start + quantile_tasks_per_job, len(quantile_tasks))))}
+        for start in range(0, len(quantile_tasks), quantile_tasks_per_job)
+    ]
     manifest = {
         **manifest_core,
         "manifest_sha256": manifest_sha256,
@@ -758,6 +765,9 @@ def build_q95_workflow_manifest(
         "staging_tasks": staging_tasks,
         "quantile_task_count": len(quantile_tasks),
         "quantile_tasks": quantile_tasks,
+        "quantile_tasks_per_job": int(quantile_tasks_per_job),
+        "quantile_job_count": len(quantile_job_tasks),
+        "quantile_job_tasks": quantile_job_tasks,
         "raw_source_write_policy": "read_only",
         "daily_intermediate_storage": (
             "temporary per-band daily means; retained between staging and all lead q95 tasks, "
