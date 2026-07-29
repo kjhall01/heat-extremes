@@ -758,6 +758,20 @@ def q95_band_marker(model_directory: Path, band_index: int) -> Path:
     return model_directory / "band_completion" / f"band_{band_index:02d}.json"
 
 
+def q95_lead_marker(
+    model_directory: Path, band_index: int, forecast_day: int
+) -> Path:
+    """Return the restart checkpoint written after one band's lead is committed."""
+    return q95_lead_checkpoint_directory(model_directory, band_index) / (
+        f"forecast_day_{forecast_day:03d}.json"
+    )
+
+
+def q95_lead_checkpoint_directory(model_directory: Path, band_index: int) -> Path:
+    """Return one band's transient lead-checkpoint directory."""
+    return model_directory / ".q95_work" / "lead_completion" / f"band_{band_index:02d}"
+
+
 def _valid_band_marker(
     marker: Path,
     *,
@@ -772,6 +786,26 @@ def _valid_band_marker(
         payload.get("status") == "complete"
         and payload.get("manifest_sha256") == manifest_sha256
         and payload.get("band_index") == band_index
+    )
+
+
+def _valid_lead_marker(
+    marker: Path,
+    *,
+    manifest_sha256: str,
+    band_index: int,
+    forecast_day: int,
+) -> bool:
+    """Return whether a lead's final-product write was fully committed."""
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        payload.get("status") == "complete"
+        and payload.get("manifest_sha256") == manifest_sha256
+        and payload.get("band_index") == band_index
+        and payload.get("forecast_day") == forecast_day
     )
 
 
@@ -1034,6 +1068,19 @@ def _remove_daily_work_store(
         pass
 
 
+def _remove_q95_lead_checkpoints(
+    manifest: dict[str, Any], *, model_directory: Path, band_index: int
+) -> None:
+    """Remove small restart markers once the whole band has its final marker."""
+    checkpoint_directory = q95_lead_checkpoint_directory(model_directory, band_index)
+    remove_result_path(checkpoint_directory, Path(manifest["result_root"]))
+    for parent in (checkpoint_directory.parent, checkpoint_directory.parent.parent):
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+
+
 def _window_sample_counts(
     valid_date: xr.DataArray,
     *,
@@ -1137,9 +1184,8 @@ def compute_q95_band(
 ) -> dict[str, Any]:
     """Compute one non-overlapping longitude region of one final global Zarr.
 
-    Source stores are opened read-only. One forecast day's daily means are
-    persisted in worker memory at a time, then released after its q95 field is
-    written directly into the final global product.
+    Source stores are opened read-only. Daily means are staged once per band,
+    and each forecast day is checkpointed after its q95 field is committed.
     """
     model = _manifest_model(manifest, model_name)
     model_directory = Path(model["product_directory"])
@@ -1204,6 +1250,19 @@ def compute_q95_band(
             int(band["longitude_start_index"]), int(band["longitude_stop_index"])
         )
         for lead_index, forecast_day in enumerate(forecast_days):
+            lead_marker = q95_lead_marker(model_directory, band_index, forecast_day)
+            if not overwrite and _valid_lead_marker(
+                lead_marker,
+                manifest_sha256=manifest_sha256,
+                band_index=band_index,
+                forecast_day=forecast_day,
+            ):
+                print(
+                    f"Reusing committed {model_name} band {band_index}, "
+                    f"forecast day {forecast_day} q95…",
+                    flush=True,
+                )
+                continue
             print(
                 f"Persisting {model_name} band {band_index}, forecast day {forecast_day} "
                 f"({lead_index + 1}/{len(forecast_days)})…",
@@ -1259,6 +1318,19 @@ def compute_q95_band(
                         },
                         consolidated=False,
                     )
+                write_json_atomic(
+                    {
+                        "status": "complete",
+                        "created_at": now_utc(),
+                        "manifest_sha256": manifest_sha256,
+                        "model": model_name,
+                        "band_index": band_index,
+                        "forecast_day": forecast_day,
+                        "longitude_start_index": int(band["longitude_start_index"]),
+                        "longitude_stop_index": int(band["longitude_stop_index"]),
+                    },
+                    lead_marker,
+                )
             finally:
                 # The persisted lead lives only in this task's Dask cache;
                 # freeing it before the next lead keeps the peak memory small.
@@ -1287,6 +1359,9 @@ def compute_q95_band(
                 "daily_intermediate_storage": "temporary per-band daily Zarr removed after success",
             },
             marker,
+        )
+        _remove_q95_lead_checkpoints(
+            manifest, model_directory=model_directory, band_index=band_index
         )
         return {"model": model_name, "band_index": band_index, "status": "complete"}
     finally:

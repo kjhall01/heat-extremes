@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 import heatextremes.verification.model_climatology as model_climatology
@@ -150,7 +151,7 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
         output_directory=results_root / "model_climatology" / "synthetic_q95",
         years=[2000],
         months=[1],
-        forecast_days=[0],
+        forecast_days=[0, 1],
         window_days=15,
         percentile=95.0,
     )
@@ -158,18 +159,49 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
     assert manifest["task_count"] == 6
     # Exercise append-mode temporary staging rather than only the first batch.
     monkeypatch.setattr(model_climatology, "RAW_STORE_BATCH_SIZE", 1)
-    for task in manifest["tasks"]:
+    first_task = manifest["tasks"][0]
+    original_calendar_window_quantile = model_climatology.calendar_window_quantile
+    call_count = 0
+
+    def stop_after_first_lead(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("synthetic task interruption")
+        return original_calendar_window_quantile(*args, **kwargs)
+
+    monkeypatch.setattr(model_climatology, "calendar_window_quantile", stop_after_first_lead)
+    with pytest.raises(RuntimeError, match="synthetic task interruption"):
+        compute_q95_band(
+            manifest,
+            model_name=first_task["model"],
+            band_index=first_task["band_index"],
+        )
+    product_directory = Path(manifest["models"][0]["product_directory"])
+    assert model_climatology.q95_lead_marker(
+        product_directory, first_task["band_index"], 0
+    ).is_file()
+    assert model_climatology.q95_daily_work_store(
+        product_directory, first_task["band_index"]
+    ).is_dir()
+
+    monkeypatch.setattr(
+        model_climatology, "calendar_window_quantile", original_calendar_window_quantile
+    )
+    assert compute_q95_band(
+        manifest, model_name=first_task["model"], band_index=first_task["band_index"]
+    )["status"] == "complete"
+    for task in manifest["tasks"][1:]:
         assert compute_q95_band(
             manifest, model_name=task["model"], band_index=task["band_index"]
         )["status"] == "complete"
     completed = finalize_q95_workflow(manifest)
 
-    product_directory = Path(manifest["models"][0]["product_directory"])
     dataset = xr.open_zarr(product_directory / "q95.zarr", consolidated=True, chunks={})
     try:
         assert completed[0]["status"] == "complete"
-        assert dataset[MODEL_Q95_VARIABLE].shape == (1, DAY_OF_YEAR_COUNT, 1, 6)
-        assert dataset[SAMPLE_COUNT_VARIABLE].shape == (1, DAY_OF_YEAR_COUNT, 6)
+        assert dataset[MODEL_Q95_VARIABLE].shape == (2, DAY_OF_YEAR_COUNT, 1, 6)
+        assert dataset[SAMPLE_COUNT_VARIABLE].shape == (2, DAY_OF_YEAR_COUNT, 6)
         assert int(dataset[SAMPLE_COUNT_VARIABLE].max()) == 2
     finally:
         dataset.close()
