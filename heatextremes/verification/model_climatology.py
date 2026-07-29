@@ -11,6 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 import gc
 import hashlib
+import inspect
 import json
 import math
 from pathlib import Path
@@ -417,6 +418,37 @@ def _set_zarr_dimensions(array: zarr.Array, dimensions: tuple[str, ...]) -> None
     array.attrs["_ARRAY_DIMENSIONS"] = list(dimensions)
 
 
+def _open_output_group(path: Path, *, mode: str) -> zarr.Group:
+    """Open a Zarr v2 output group under either supported zarr-python API."""
+    version_keyword = (
+        "zarr_format"
+        if "zarr_format" in inspect.signature(zarr.open_group).parameters
+        else "zarr_version"
+    )
+    try:
+        return zarr.open_group(str(path), mode=mode, **{version_keyword: 2})
+    except (TypeError, ValueError):
+        if mode == "w":
+            raise
+        # A failed first attempt under zarr-python 3 may have left a tiny v3
+        # group behind. Open it only so bootstrap can recognize and replace
+        # the incomplete schema with the intended v2 product.
+        return zarr.open_group(str(path), mode=mode)
+
+
+def _global_store_has_schema(group: zarr.Group) -> bool:
+    """Reject a schema left behind by an interrupted initialization."""
+    required = {
+        "forecast_day",
+        "dayofyear",
+        "latitude",
+        "longitude",
+        MODEL_Q95_VARIABLE,
+        SAMPLE_COUNT_VARIABLE,
+    }
+    return required.issubset(group.array_keys())
+
+
 def _create_global_q95_store(
     store: Path,
     *,
@@ -433,7 +465,7 @@ def _create_global_q95_store(
 ) -> None:
     """Create metadata and empty final arrays without materializing NaN chunks."""
     store.parent.mkdir(parents=True, exist_ok=True)
-    group = zarr.open_group(str(store), mode="w")
+    group = _open_output_group(store, mode="w")
     group.attrs.update(
         {
             "title": "Lead-dependent local-solar daily-mean model temperature climatology",
@@ -455,7 +487,15 @@ def _create_global_q95_store(
         "longitude": (np.asarray(longitude), ("longitude",)),
     }
     for name, (values, dimensions) in coordinate_specs.items():
-        array = group.create_dataset(name, data=values, chunks=values.shape)
+        # zarr-python 3 requires shape even when data are supplied. Creating
+        # then assigning these tiny coordinate arrays also works in zarr 2.
+        array = group.create_dataset(
+            name,
+            shape=values.shape,
+            chunks=values.shape,
+            dtype=values.dtype,
+        )
+        array[...] = values
         _set_zarr_dimensions(array, dimensions)
 
     q95_shape = (len(forecast_days), DAY_OF_YEAR_COUNT, len(latitude), len(longitude))
@@ -642,11 +682,31 @@ def build_q95_workflow_manifest(
         if overwrite and model_directory.exists():
             remove_result_path(model_directory, result_root)
         if store.exists():
-            group = zarr.open_group(str(store), mode="r")
+            group = _open_output_group(store, mode="r")
             if group.attrs.get("manifest_sha256") != manifest_sha256:
                 raise ValueError(
                     f"Existing q95 product has a different manifest: {store}. "
                     "Use --overwrite to replace it."
+                )
+            if not _global_store_has_schema(group):
+                if (model_directory / "completion.json").is_file():
+                    raise ValueError(
+                        f"Completed q95 product has an invalid schema: {store}; "
+                        "use --overwrite to replace it."
+                    )
+                remove_result_path(model_directory, result_root)
+                _create_global_q95_store(
+                    store,
+                    latitude=np.asarray(spec["latitude"]),
+                    longitude=np.asarray(spec["longitude"]),
+                    forecast_days=requested_days,
+                    manifest_sha256=manifest_sha256,
+                    model_name=str(spec["model"]),
+                    years=requested_years,
+                    months=requested_months,
+                    window_days=window_days,
+                    percentile=percentile,
+                    longitude_chunk=int(spec["output_longitude_chunk"]),
                 )
         else:
             _create_global_q95_store(
@@ -930,7 +990,7 @@ def compute_q95_band(
         return {"model": model_name, "band_index": band_index, "status": "already_complete"}
     if not store.is_dir():
         raise FileNotFoundError(f"Global q95 product was not initialized: {store}")
-    group = zarr.open_group(str(store), mode="r")
+    group = _open_output_group(store, mode="r")
     if group.attrs.get("manifest_sha256") != manifest_sha256:
         raise ValueError("Global q95 product does not match this workflow manifest")
     if overwrite:
