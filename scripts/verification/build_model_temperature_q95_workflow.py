@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Initialize final-only global model q95 products from a ready preflight.
+"""Initialize global model q95 products and their two-phase Slurm manifest.
 
 This command reads the preflight JSON plus one raw store's coordinate arrays
-per model.  It does not read forecast-temperature chunks.  The resulting
-manifest drives the Slurm longitude-band array: every task writes straight into
-its model's one global q95.zarr product, with no persisted daily intermediate.
+per model. It does not read forecast-temperature chunks. The resulting
+manifest drives a raw-read-only daily staging array followed by independent
+model-band-lead q95 tasks that write one global q95.zarr product.
 """
 
 from __future__ import annotations
@@ -97,9 +97,10 @@ def main() -> None:
     write_json_atomic(manifest, manifest_path)
     print(f"Manifest: {manifest_path}")
     print(f"Global products: {output_directory}/<model>/q95.zarr")
-    print(f"Array tasks: {manifest['task_count']}")
+    print(f"Staging array tasks: {manifest['staging_task_count']}")
+    print(f"Quantile array tasks: {manifest['quantile_task_count']}")
     print("Raw source stores: read only")
-    print("Daily staging: temporary per-band Zarr; removed after each successful q95 write")
+    print("Daily staging: temporary per-band Zarr; removed only after all lead q95 writes")
 
 
 if __name__ == "__main__":

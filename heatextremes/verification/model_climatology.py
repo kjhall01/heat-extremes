@@ -728,8 +728,21 @@ def build_q95_workflow_manifest(
                 longitude_chunk=int(spec["output_longitude_chunk"]),
             )
 
-    tasks = [
+    staging_tasks = [
         {"model": spec["model"], "band_index": int(band["index"])}
+        for spec in model_specs
+        for band in spec["longitude_bands"]
+    ]
+    # Keep lead tasks ordered by lead first. With a wide Slurm throttle this
+    # spreads concurrent reads across bands instead of asking thirteen jobs to
+    # hammer the same temporary band store at once.
+    quantile_tasks = [
+        {
+            "model": spec["model"],
+            "band_index": int(band["index"]),
+            "forecast_day": forecast_day,
+        }
+        for forecast_day in requested_days
         for spec in model_specs
         for band in spec["longitude_bands"]
     ]
@@ -737,11 +750,18 @@ def build_q95_workflow_manifest(
         **manifest_core,
         "manifest_sha256": manifest_sha256,
         "created_at": now_utc(),
-        "task_count": len(tasks),
-        "tasks": tasks,
+        # ``tasks`` and ``task_count`` retain the original staging/band
+        # meaning for older callers. New launchers use the explicit phases.
+        "task_count": len(staging_tasks),
+        "tasks": staging_tasks,
+        "staging_task_count": len(staging_tasks),
+        "staging_tasks": staging_tasks,
+        "quantile_task_count": len(quantile_tasks),
+        "quantile_tasks": quantile_tasks,
         "raw_source_write_policy": "read_only",
         "daily_intermediate_storage": (
-            "temporary per-band daily means; removed after that band writes its final q95 field"
+            "temporary per-band daily means; retained between staging and all lead q95 tasks, "
+            "then removed by the finalizer"
         ),
     }
     return manifest
@@ -937,6 +957,11 @@ def q95_daily_work_marker(model_directory: Path, band_index: int) -> Path:
     return model_directory / ".q95_work" / f"band_{band_index:02d}_daily_complete.json"
 
 
+def q95_daily_work_progress_marker(model_directory: Path, band_index: int) -> Path:
+    """Return the restart marker advanced after each raw staging batch."""
+    return model_directory / ".q95_work" / f"band_{band_index:02d}_daily_progress.json"
+
+
 def _valid_daily_work_marker(
     marker: Path,
     work_store: Path,
@@ -947,6 +972,30 @@ def _valid_daily_work_marker(
     return work_store.is_dir() and _valid_band_marker(
         marker, manifest_sha256=manifest_sha256, band_index=band_index
     )
+
+
+def _daily_work_resume_index(
+    marker: Path,
+    *,
+    manifest_sha256: str,
+    band_index: int,
+    source_store_count: int,
+) -> int | None:
+    """Return a safe raw-store resume offset, or ``None`` for a fresh stage."""
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        next_source_store_index = int(payload["next_source_store_index"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    if (
+        payload.get("status") != "in_progress"
+        or payload.get("manifest_sha256") != manifest_sha256
+        or payload.get("band_index") != band_index
+        or payload.get("source_store_count") != source_store_count
+        or not 0 < next_source_store_index < source_store_count
+    ):
+        return None
+    return next_source_store_index
 
 
 def _clear_zarr_encodings(dataset: xr.Dataset) -> xr.Dataset:
@@ -976,6 +1025,7 @@ def _materialize_daily_work_store(
     band_index = int(band["index"])
     work_store = q95_daily_work_store(model_directory, band_index)
     work_marker = q95_daily_work_marker(model_directory, band_index)
+    progress_marker = q95_daily_work_progress_marker(model_directory, band_index)
     result_root = Path(manifest["result_root"])
     manifest_sha256 = str(manifest["manifest_sha256"])
     if not overwrite and _valid_daily_work_marker(
@@ -987,14 +1037,32 @@ def _materialize_daily_work_store(
         print(f"Reusing complete temporary daily store for band {band_index}…", flush=True)
         return work_store, work_marker
 
-    if work_store.exists():
-        print(f"Removing incomplete temporary daily store: {work_store}", flush=True)
-        remove_result_path(work_store, result_root)
-    work_marker.unlink(missing_ok=True)
-
     source_stores = [str(path) for path in model["source_stores"]]
+    resume_start = None if overwrite else _daily_work_resume_index(
+        progress_marker,
+        manifest_sha256=manifest_sha256,
+        band_index=band_index,
+        source_store_count=len(source_stores),
+    )
+    if work_store.exists() and resume_start is not None:
+        print(
+            f"Resuming temporary daily staging for band {band_index} at raw store "
+            f"{resume_start + 1}/{len(source_stores)}…",
+            flush=True,
+        )
+    else:
+        if work_store.exists():
+            print(f"Removing incomplete temporary daily store: {work_store}", flush=True)
+            remove_result_path(work_store, result_root)
+        work_marker.unlink(missing_ok=True)
+        progress_marker.unlink(missing_ok=True)
+        resume_start = 0
+
     batch_count = (len(source_stores) + RAW_STORE_BATCH_SIZE - 1) // RAW_STORE_BATCH_SIZE
-    for batch_index, start in enumerate(range(0, len(source_stores), RAW_STORE_BATCH_SIZE), start=1):
+    for batch_index, start in enumerate(
+        range(resume_start, len(source_stores), RAW_STORE_BATCH_SIZE),
+        start=(resume_start // RAW_STORE_BATCH_SIZE) + 1,
+    ):
         batch_paths = source_stores[start : start + RAW_STORE_BATCH_SIZE]
         print(
             f"Staging {model['model']} band {band_index}: raw batch {batch_index}/{batch_count} "
@@ -1037,6 +1105,19 @@ def _materialize_daily_work_store(
             del temperature
             del raw
             gc.collect()
+        write_json_atomic(
+            {
+                "status": "in_progress",
+                "updated_at": now_utc(),
+                "manifest_sha256": manifest_sha256,
+                "model": model["model"],
+                "band_index": band_index,
+                "source_store_count": len(source_stores),
+                "raw_store_batch_size": RAW_STORE_BATCH_SIZE,
+                "next_source_store_index": start + len(batch_paths),
+            },
+            progress_marker,
+        )
 
     zarr.consolidate_metadata(str(work_store))
     write_json_atomic(
@@ -1052,6 +1133,7 @@ def _materialize_daily_work_store(
         },
         work_marker,
     )
+    progress_marker.unlink(missing_ok=True)
     return work_store, work_marker
 
 
@@ -1175,18 +1257,13 @@ def calendar_window_quantile(
     )
 
 
-def compute_q95_band(
+def _q95_band_context(
     manifest: dict[str, Any],
     *,
     model_name: str,
     band_index: int,
-    overwrite: bool = False,
-) -> dict[str, Any]:
-    """Compute one non-overlapping longitude region of one final global Zarr.
-
-    Source stores are opened read-only. Daily means are staged once per band,
-    and each forecast day is checkpointed after its q95 field is committed.
-    """
+) -> tuple[dict[str, Any], Path, Path, str, dict[str, Any]]:
+    """Return validated model, output, manifest, and longitude-band metadata."""
     model = _manifest_model(manifest, model_name)
     model_directory = Path(model["product_directory"])
     store = Path(model["product_store"])
@@ -1195,6 +1272,25 @@ def compute_q95_band(
     if band_index not in bands:
         raise KeyError(f"{model_name} has no longitude band {band_index}")
     band = bands[band_index]
+    return model, model_directory, store, manifest_sha256, band
+
+
+def stage_q95_band(
+    manifest: dict[str, Any],
+    *,
+    model_name: str,
+    band_index: int,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Stage every requested lead's daily means for one model longitude band.
+
+    This is deliberately the only phase that reads raw reforecast Zarr stores.
+    It writes one temporary all-lead band store, which independent q95 lead
+    tasks can then share read-only.
+    """
+    model, model_directory, store, manifest_sha256, band = _q95_band_context(
+        manifest, model_name=model_name, band_index=band_index
+    )
     marker = q95_band_marker(model_directory, band_index)
     if not overwrite and _valid_band_marker(
         marker, manifest_sha256=manifest_sha256, band_index=band_index
@@ -1207,24 +1303,101 @@ def compute_q95_band(
         raise ValueError("Global q95 product does not match this workflow manifest")
     if overwrite:
         marker.unlink(missing_ok=True)
+        _remove_q95_lead_checkpoints(
+            manifest, model_directory=model_directory, band_index=band_index
+        )
 
     forecast_days = tuple(int(day) for day in manifest["forecast_days"])
+    print(
+        f"Staging {model_name} raw source read-only for longitude band {band_index} "
+        f"[{band['longitude_start']}, {band['longitude_stop']})…",
+        flush=True,
+    )
+    work_store, _ = _materialize_daily_work_store(
+        manifest,
+        model=model,
+        band=band,
+        forecast_days=forecast_days,
+        overwrite=overwrite,
+    )
+    return {
+        "model": model_name,
+        "band_index": band_index,
+        "status": "staged",
+        "work_store": str(work_store),
+    }
+
+
+def compute_q95_lead(
+    manifest: dict[str, Any],
+    *,
+    model_name: str,
+    band_index: int,
+    forecast_day: int,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Calculate and commit one model-band-forecast-day q95 field.
+
+    Different calls own different forecast-day/longitude Zarr chunks, so they
+    can run in parallel after the one shared staging task has finished.
+    """
+    model, model_directory, store, manifest_sha256, band = _q95_band_context(
+        manifest, model_name=model_name, band_index=band_index
+    )
+    forecast_days = tuple(int(day) for day in manifest["forecast_days"])
+    if forecast_day not in forecast_days:
+        raise KeyError(f"forecast day {forecast_day} is absent from this q95 workflow")
+    lead_index = forecast_days.index(forecast_day)
+    band_marker = q95_band_marker(model_directory, band_index)
+    if not overwrite and _valid_band_marker(
+        band_marker, manifest_sha256=manifest_sha256, band_index=band_index
+    ):
+        return {
+            "model": model_name,
+            "band_index": band_index,
+            "forecast_day": forecast_day,
+            "status": "already_complete",
+        }
+    if not store.is_dir():
+        raise FileNotFoundError(f"Global q95 product was not initialized: {store}")
+    group = _open_output_group(store, mode="r")
+    if group.attrs.get("manifest_sha256") != manifest_sha256:
+        raise ValueError("Global q95 product does not match this workflow manifest")
+    lead_marker = q95_lead_marker(model_directory, band_index, forecast_day)
+    if not overwrite and _valid_lead_marker(
+        lead_marker,
+        manifest_sha256=manifest_sha256,
+        band_index=band_index,
+        forecast_day=forecast_day,
+    ):
+        return {
+            "model": model_name,
+            "band_index": band_index,
+            "forecast_day": forecast_day,
+            "status": "already_complete",
+        }
+
+    work_store = q95_daily_work_store(model_directory, band_index)
+    work_marker = q95_daily_work_marker(model_directory, band_index)
+    if not _valid_daily_work_marker(
+        work_marker,
+        work_store,
+        manifest_sha256=manifest_sha256,
+        band_index=band_index,
+    ):
+        raise RuntimeError(
+            f"{model_name} band {band_index}: daily staging is incomplete; "
+            "the staging array must succeed before q95 lead tasks run"
+        )
+
     daily: xr.DataArray | None = None
     daily_work_dataset: xr.Dataset | None = None
     try:
         print(
-            f"Staging {model_name} raw source read-only for longitude band {band_index} "
-            f"[{band['longitude_start']}, {band['longitude_stop']})…",
+            f"Opening staged daily means for {model_name} band {band_index}, "
+            f"forecast day {forecast_day}…",
             flush=True,
         )
-        work_store, work_marker = _materialize_daily_work_store(
-            manifest,
-            model=model,
-            band=band,
-            forecast_days=forecast_days,
-            overwrite=overwrite,
-        )
-        print("Opening bounded temporary daily means for q95 calculation…", flush=True)
         daily_work_dataset = xr.open_zarr(work_store, consolidated=True, chunks={})
         daily = daily_work_dataset[DAILY_WORK_VARIABLE].chunk(
             {
@@ -1242,146 +1415,175 @@ def compute_q95_band(
             raise ValueError("Temporary daily longitude coordinates differ from the product schema")
         sample_counts = _window_sample_counts(
             daily["valid_date"],
-            forecast_days=forecast_days,
+            forecast_days=(forecast_day,),
             longitude_count=daily.sizes["longitude"],
             window_days=int(manifest["window_days"]),
         )
         longitude_region = slice(
             int(band["longitude_start_index"]), int(band["longitude_stop_index"])
         )
-        for lead_index, forecast_day in enumerate(forecast_days):
-            lead_marker = q95_lead_marker(model_directory, band_index, forecast_day)
-            if not overwrite and _valid_lead_marker(
-                lead_marker,
-                manifest_sha256=manifest_sha256,
-                band_index=band_index,
-                forecast_day=forecast_day,
-            ):
-                print(
-                    f"Reusing committed {model_name} band {band_index}, "
-                    f"forecast day {forecast_day} q95…",
-                    flush=True,
-                )
-                continue
+        print(
+            f"Persisting {model_name} band {band_index}, forecast day {forecast_day} "
+            f"({lead_index + 1}/{len(forecast_days)})…",
+            flush=True,
+        )
+        lead_daily = daily.sel(forecast_day=forecast_day, drop=True)
+        lead_dates = (
+            daily["valid_date"].sel(forecast_day=forecast_day).isel(longitude=0, drop=True)
+        )
+        # Each lead task persists only one forecast-day field.  Its result
+        # owns a disjoint forecast-day/longitude region of the final store.
+        with ProgressBar():
+            lead_daily = lead_daily.persist()
+        q95: xr.DataArray | None = None
+        payload: xr.Dataset | None = None
+        try:
             print(
-                f"Persisting {model_name} band {band_index}, forecast day {forecast_day} "
-                f"({lead_index + 1}/{len(forecast_days)})…",
+                f"Computing {model_name} band {band_index}, forecast day {forecast_day} q95…",
                 flush=True,
             )
-            lead_daily = daily.sel(forecast_day=forecast_day, drop=True)
-            lead_dates = (
-                daily["valid_date"]
-                .sel(forecast_day=forecast_day)
-                .isel(longitude=0, drop=True)
+            q95 = calendar_window_quantile(
+                lead_daily,
+                lead_dates,
+                window_days=int(manifest["window_days"]),
+                percentile=float(manifest["percentile"]),
+            ).expand_dims(forecast_day=[forecast_day])
+            payload = xr.Dataset(
+                {
+                    MODEL_Q95_VARIABLE: (
+                        ("forecast_day", "dayofyear", "latitude", "longitude"), q95.data
+                    ),
+                    SAMPLE_COUNT_VARIABLE: (
+                        ("forecast_day", "dayofyear", "longitude"), sample_counts
+                    ),
+                }
             )
-            # Keeping all thirteen leads cached consumed too much memory on
-            # full-resolution bands. Persisting just this lead bounds the
-            # working set while retaining in-memory reuse during its q95
-            # reduction; nothing is written outside the final Zarr product.
             with ProgressBar():
-                lead_daily = lead_daily.persist()
-            q95: xr.DataArray | None = None
-            payload: xr.Dataset | None = None
-            try:
-                print(
-                    f"Computing {model_name} band {band_index}, forecast day {forecast_day} q95…",
-                    flush=True,
-                )
-                q95 = calendar_window_quantile(
-                    lead_daily,
-                    lead_dates,
-                    window_days=int(manifest["window_days"]),
-                    percentile=float(manifest["percentile"]),
-                ).expand_dims(forecast_day=[forecast_day])
-                # Deliberately omit coordinate variables: this task owns only
-                # its longitude-region data chunks. It must never contend with
-                # another task over global coordinate metadata.
-                payload = xr.Dataset(
-                    {
-                        MODEL_Q95_VARIABLE: (
-                            ("forecast_day", "dayofyear", "latitude", "longitude"),
-                            q95.data,
-                        ),
-                        SAMPLE_COUNT_VARIABLE: (
-                            ("forecast_day", "dayofyear", "longitude"),
-                            sample_counts[lead_index : lead_index + 1],
-                        ),
-                    }
-                )
-                with ProgressBar():
-                    payload.to_zarr(
-                        store,
-                        mode="r+",
-                        region={
-                            "forecast_day": slice(lead_index, lead_index + 1),
-                            "longitude": longitude_region,
-                        },
-                        consolidated=False,
-                    )
-                write_json_atomic(
-                    {
-                        "status": "complete",
-                        "created_at": now_utc(),
-                        "manifest_sha256": manifest_sha256,
-                        "model": model_name,
-                        "band_index": band_index,
-                        "forecast_day": forecast_day,
-                        "longitude_start_index": int(band["longitude_start_index"]),
-                        "longitude_stop_index": int(band["longitude_stop_index"]),
+                payload.to_zarr(
+                    store,
+                    mode="r+",
+                    region={
+                        "forecast_day": slice(lead_index, lead_index + 1),
+                        "longitude": longitude_region,
                     },
-                    lead_marker,
+                    consolidated=False,
                 )
-            finally:
-                # The persisted lead lives only in this task's Dask cache;
-                # freeing it before the next lead keeps the peak memory small.
-                del payload
-                del q95
-                del lead_daily
-                gc.collect()
-
-        del daily
-        daily = None
-        gc.collect()
-        if daily_work_dataset is not None:
-            daily_work_dataset.close()
-            daily_work_dataset = None
-        _remove_daily_work_store(manifest, work_store=work_store, work_marker=work_marker)
-        write_json_atomic(
-            {
-                "status": "complete",
-                "created_at": now_utc(),
-                "manifest_sha256": manifest_sha256,
-                "model": model_name,
-                "band_index": band_index,
-                "longitude_start_index": int(band["longitude_start_index"]),
-                "longitude_stop_index": int(band["longitude_stop_index"]),
-                "source_store_count": int(model["source_store_count"]),
-                "daily_intermediate_storage": "temporary per-band daily Zarr removed after success",
-            },
-            marker,
-        )
-        _remove_q95_lead_checkpoints(
-            manifest, model_directory=model_directory, band_index=band_index
-        )
-        return {"model": model_name, "band_index": band_index, "status": "complete"}
+            write_json_atomic(
+                {
+                    "status": "complete",
+                    "created_at": now_utc(),
+                    "manifest_sha256": manifest_sha256,
+                    "model": model_name,
+                    "band_index": band_index,
+                    "forecast_day": forecast_day,
+                    "longitude_start_index": int(band["longitude_start_index"]),
+                    "longitude_stop_index": int(band["longitude_stop_index"]),
+                },
+                lead_marker,
+            )
+        finally:
+            del payload
+            del q95
+            del lead_daily
+            gc.collect()
+        return {
+            "model": model_name,
+            "band_index": band_index,
+            "forecast_day": forecast_day,
+            "status": "complete",
+        }
     finally:
-        # Persisted Dask blocks are process-local. Release references before
-        # the Slurm task exits so a failed/retried task never leaves a cache on
-        # the shared filesystem.
         del daily
         gc.collect()
         if daily_work_dataset is not None:
             daily_work_dataset.close()
+
+
+def _complete_q95_band(
+    manifest: dict[str, Any], *, model_name: str, band_index: int
+) -> dict[str, Any]:
+    """Commit a band only after all independently written forecast days exist."""
+    model, model_directory, _, manifest_sha256, band = _q95_band_context(
+        manifest, model_name=model_name, band_index=band_index
+    )
+    marker = q95_band_marker(model_directory, band_index)
+    if _valid_band_marker(marker, manifest_sha256=manifest_sha256, band_index=band_index):
+        return {"model": model_name, "band_index": band_index, "status": "already_complete"}
+    incomplete_leads = [
+        forecast_day
+        for forecast_day in (int(day) for day in manifest["forecast_days"])
+        if not _valid_lead_marker(
+            q95_lead_marker(model_directory, band_index, forecast_day),
+            manifest_sha256=manifest_sha256,
+            band_index=band_index,
+            forecast_day=forecast_day,
+        )
+    ]
+    if incomplete_leads:
+        raise RuntimeError(
+            f"{model_name} band {band_index}: cannot complete; forecast days are incomplete: "
+            f"{incomplete_leads}"
+        )
+    write_json_atomic(
+        {
+            "status": "complete",
+            "created_at": now_utc(),
+            "manifest_sha256": manifest_sha256,
+            "model": model_name,
+            "band_index": band_index,
+            "longitude_start_index": int(band["longitude_start_index"]),
+            "longitude_stop_index": int(band["longitude_stop_index"]),
+            "source_store_count": int(model["source_store_count"]),
+            "daily_intermediate_storage": "temporary per-band daily Zarr removed after success",
+        },
+        marker,
+    )
+    _remove_daily_work_store(
+        manifest,
+        work_store=q95_daily_work_store(model_directory, band_index),
+        work_marker=q95_daily_work_marker(model_directory, band_index),
+    )
+    q95_daily_work_progress_marker(model_directory, band_index).unlink(missing_ok=True)
+    _remove_q95_lead_checkpoints(manifest, model_directory=model_directory, band_index=band_index)
+    return {"model": model_name, "band_index": band_index, "status": "complete"}
+
+
+def compute_q95_band(
+    manifest: dict[str, Any],
+    *,
+    model_name: str,
+    band_index: int,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Compatibility wrapper that stages and computes every lead serially."""
+    staged = stage_q95_band(
+        manifest, model_name=model_name, band_index=band_index, overwrite=overwrite
+    )
+    if staged["status"] == "already_complete":
+        return staged
+    for forecast_day in (int(day) for day in manifest["forecast_days"]):
+        compute_q95_lead(
+            manifest,
+            model_name=model_name,
+            band_index=band_index,
+            forecast_day=forecast_day,
+            overwrite=overwrite,
+        )
+    return _complete_q95_band(manifest, model_name=model_name, band_index=band_index)
 
 
 def finalize_q95_workflow(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """Validate all band markers, consolidate each global Zarr, then commit it."""
+    """Commit completed lead tasks, consolidate each global Zarr, then finish."""
     manifest_sha256 = str(manifest["manifest_sha256"])
     results: list[dict[str, Any]] = []
     for model in manifest["models"]:
         model_directory = Path(model["product_directory"])
         store = Path(model["product_store"])
         expected_bands = [int(item["index"]) for item in model["longitude_bands"]]
+        for band_index in expected_bands:
+            _complete_q95_band(
+                manifest, model_name=str(model["model"]), band_index=band_index
+            )
         incomplete = [
             band_index
             for band_index in expected_bands

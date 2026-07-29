@@ -14,10 +14,12 @@ from heatextremes.verification.model_climatology import (
     build_q95_workflow_manifest,
     calendar_window_quantile,
     compute_q95_band,
+    compute_q95_lead,
     circular_window_counts,
     finalize_q95_workflow,
     inspect_raw_store,
     preflight_model,
+    stage_q95_band,
 )
 from heatextremes.verification.reforecast_inventory import ReforecastModelInventory
 
@@ -157,9 +159,36 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
     )
 
     assert manifest["task_count"] == 6
+    assert manifest["staging_task_count"] == 6
+    assert manifest["quantile_task_count"] == 12
     # Exercise append-mode temporary staging rather than only the first batch.
     monkeypatch.setattr(model_climatology, "RAW_STORE_BATCH_SIZE", 1)
     first_task = manifest["tasks"][0]
+    original_open_raw_ensemble_mean = model_climatology._open_raw_ensemble_mean
+    raw_open_count = 0
+
+    def stop_after_first_raw_batch(*args, **kwargs):
+        nonlocal raw_open_count
+        raw_open_count += 1
+        if raw_open_count == 2:
+            raise RuntimeError("synthetic staging interruption")
+        return original_open_raw_ensemble_mean(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_climatology, "_open_raw_ensemble_mean", stop_after_first_raw_batch
+    )
+    with pytest.raises(RuntimeError, match="synthetic staging interruption"):
+        stage_q95_band(
+            manifest, model_name=first_task["model"], band_index=first_task["band_index"]
+        )
+    product_directory = Path(manifest["models"][0]["product_directory"])
+    assert model_climatology.q95_daily_work_progress_marker(
+        product_directory, first_task["band_index"]
+    ).is_file()
+    monkeypatch.setattr(
+        model_climatology, "_open_raw_ensemble_mean", original_open_raw_ensemble_mean
+    )
+
     original_calendar_window_quantile = model_climatology.calendar_window_quantile
     call_count = 0
 
@@ -171,13 +200,22 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
         return original_calendar_window_quantile(*args, **kwargs)
 
     monkeypatch.setattr(model_climatology, "calendar_window_quantile", stop_after_first_lead)
+    assert stage_q95_band(
+        manifest, model_name=first_task["model"], band_index=first_task["band_index"]
+    )["status"] == "staged"
     with pytest.raises(RuntimeError, match="synthetic task interruption"):
-        compute_q95_band(
+        compute_q95_lead(
             manifest,
             model_name=first_task["model"],
             band_index=first_task["band_index"],
+            forecast_day=0,
         )
-    product_directory = Path(manifest["models"][0]["product_directory"])
+        compute_q95_lead(
+            manifest,
+            model_name=first_task["model"],
+            band_index=first_task["band_index"],
+            forecast_day=1,
+        )
     assert model_climatology.q95_lead_marker(
         product_directory, first_task["band_index"], 0
     ).is_file()
@@ -188,6 +226,12 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
     monkeypatch.setattr(
         model_climatology, "calendar_window_quantile", original_calendar_window_quantile
     )
+    assert compute_q95_lead(
+        manifest,
+        model_name=first_task["model"],
+        band_index=first_task["band_index"],
+        forecast_day=1,
+    )["status"] == "complete"
     assert compute_q95_band(
         manifest, model_name=first_task["model"], band_index=first_task["band_index"]
     )["status"] == "complete"
