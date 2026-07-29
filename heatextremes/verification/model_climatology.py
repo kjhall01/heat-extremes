@@ -1089,7 +1089,10 @@ def _materialize_daily_work_store(
                 temperature, band=band, forecast_days=forecast_days
             ).chunk(
                 {
-                    "time": 1,
+                    # Match the append batch. Time=1 creates roughly one
+                    # Zarr object per initialization/lead/spatial-tile,
+                    # making both staging and cleanup metadata-bound.
+                    "time": RAW_STORE_BATCH_SIZE,
                     "forecast_day": 1,
                     "latitude": MODEL_Q95_OUTPUT_CHUNKS["latitude"],
                     "longitude": MODEL_Q95_OUTPUT_CHUNKS["longitude"],

@@ -204,6 +204,15 @@ def test_q95_band_tasks_write_one_final_global_store_without_daily_files(
     assert stage_q95_band(
         manifest, model_name=first_task["model"], band_index=first_task["band_index"]
     )["status"] == "staged"
+    staged = xr.open_zarr(
+        model_climatology.q95_daily_work_store(product_directory, first_task["band_index"]),
+        consolidated=True,
+        chunks={},
+    )
+    try:
+        assert staged[model_climatology.DAILY_WORK_VARIABLE].encoding["chunks"][0] == 1
+    finally:
+        staged.close()
     with pytest.raises(RuntimeError, match="synthetic task interruption"):
         compute_q95_lead(
             manifest,
