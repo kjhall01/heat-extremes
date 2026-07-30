@@ -88,6 +88,7 @@ def main() -> None:
         years=args.years,
         months=args.months,
         max_forecast_day=args.max_forecast_day,
+        included_model_names=args.models,
     )
     selected = set(args.models or ())
     if selected:

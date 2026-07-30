@@ -69,6 +69,7 @@ v_200
 v_850
 z_500
 z_850",DSI,/net/monsoon/marchakitus/AIFS/v2p0/combined/forecasts_AIFS_ENS_v2,To be updated with more variables
+IFS-ENS,2000-2025,-1,~weekly,51,50 days,2t,DSI,/net/monsoon/marchakitus/IFS/IFS_ENS,Raw Zarr layout matches AIFS-ENS-v2; inventory validates metadata before submission.
 NeuralGCM-IMERG,2000-2024,5-9,~weekly,25,45 days,"v_component_of_wind_200_avg
 geopotential_850_avg
 temperature_1000

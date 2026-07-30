@@ -13,6 +13,9 @@ Options:
   --reforecast-root DIRECTORY   default: /net/monsoon/marchakitus/reforecast
   --metadata-csv FILE           default: Rossby Model Storage Locations - Sheet1.csv in repository root
   --result-root DIRECTORY       default: /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results
+  --models "NAME ..."          optionally run only named normalized/display models
+  --manifest FILE               inventory manifest path; use a model-specific path for an isolated run
+  --config-directory DIRECTORY  generated model-config directory; defaults beside the manifest
   --years "YYYY ..."            default: "2022 2023 2024 2025"
   --months "MM ..."             default: "6 7 8 9"
   --max-forecast-day N          inclusive zero-based lead cap; default: 14
@@ -28,6 +31,9 @@ EOF
 REFORECAST_ROOT="/net/monsoon/marchakitus/reforecast"
 METADATA_CSV=""
 RESULT_ROOT="/net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results"
+MODELS_TEXT=""
+MANIFEST=""
+CONFIG_DIRECTORY=""
 YEARS_TEXT="2022 2023 2024 2025"
 MONTHS_TEXT="6 7 8 9"
 MAX_FORECAST_DAY=14
@@ -42,6 +48,9 @@ while (( $# )); do
         --reforecast-root) REFORECAST_ROOT="$2"; shift 2 ;;
         --metadata-csv) METADATA_CSV="$2"; shift 2 ;;
         --result-root) RESULT_ROOT="$2"; shift 2 ;;
+        --models) MODELS_TEXT="$2"; shift 2 ;;
+        --manifest) MANIFEST="$2"; shift 2 ;;
+        --config-directory) CONFIG_DIRECTORY="$2"; shift 2 ;;
         --years) YEARS_TEXT="$2"; shift 2 ;;
         --months) MONTHS_TEXT="$2"; shift 2 ;;
         --max-forecast-day) MAX_FORECAST_DAY="$2"; shift 2 ;;
@@ -68,10 +77,16 @@ REFORECAST_ROOT="$(cd "${REFORECAST_ROOT}" && pwd)"
 # exist before this launcher creates it.  The Python writers still confine all
 # overwrite/delete operations to this explicit root.
 RESULT_ROOT="${RESULT_ROOT%/}"
-MANIFEST="${RESULT_ROOT}/inventory/reforecast_inventory.json"
-CONFIG_DIRECTORY="${RESULT_ROOT}/inventory/configs"
+MANIFEST="${MANIFEST:-${RESULT_ROOT}/inventory/reforecast_inventory.json}"
+CONFIG_DIRECTORY="${CONFIG_DIRECTORY:-${RESULT_ROOT}/inventory/configs}"
 METADATA_CSV="${METADATA_CSV:-${REPOSITORY_ROOT}/Rossby Model Storage Locations - Sheet1.csv}"
-mkdir -p "${RESULT_ROOT}/logs" "${RESULT_ROOT}/inventory"
+mkdir -p "${RESULT_ROOT}/logs" "$(dirname "${MANIFEST}")" "${CONFIG_DIRECTORY}"
+
+MODEL_ARGS=()
+if [[ -n "${MODELS_TEXT}" ]]; then
+    read -r -a MODELS <<< "${MODELS_TEXT}"
+    MODEL_ARGS=(--models "${MODELS[@]}")
+fi
 
 "${PYTHON}" -u "${REPOSITORY_ROOT}/scripts/verification/inventory_reforecast_models.py" \
     --reforecast-root "${REFORECAST_ROOT}" \
@@ -80,7 +95,8 @@ mkdir -p "${RESULT_ROOT}/logs" "${RESULT_ROOT}/inventory"
     --repository-root "${REPOSITORY_ROOT}" \
     --years ${YEARS_TEXT} --months ${MONTHS_TEXT} \
     --max-forecast-day "${MAX_FORECAST_DAY}" \
-    --manifest "${MANIFEST}" --config-directory "${CONFIG_DIRECTORY}"
+    --manifest "${MANIFEST}" --config-directory "${CONFIG_DIRECTORY}" \
+    "${MODEL_ARGS[@]}"
 
 TASK_COUNT="$("${PYTHON}" -c 'import json, sys; print(json.load(open(sys.argv[1]))["task_count"])' "${MANIFEST}")"
 if (( TASK_COUNT == 0 )); then

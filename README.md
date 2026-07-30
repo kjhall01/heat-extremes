@@ -4,6 +4,8 @@ Tools and batch workflows for verifying heat-extreme forecasts against ERA5.
 Existing notebooks and the earlier T2M/precipitation scripts are retained as
 historical and exploratory records.  The production-oriented heat workflow is
 documented in [docs/verification.md](docs/verification.md).
+For the concise end-to-end data flow and model-addition procedure, see
+[docs/verification_pipeline.md](docs/verification_pipeline.md).
 
 ## AIFS ENS v2 verification: minimal workflow
 

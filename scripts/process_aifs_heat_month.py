@@ -148,9 +148,7 @@ def select_monthly_paths(root: Path, year: int, month: int) -> list[Path]:
             paths.append(path)
 
     if not paths:
-        message = (
-            f"No AIFS ENS v2 stores found under {root} for {year}-{month:02d}."
-        )
+        message = f"No compatible forecast stores found under {root} for {year}-{month:02d}."
         if unparsed:
             message += (
                 f" Could not parse dates from {len(unparsed)} store names; "
@@ -407,7 +405,7 @@ def local_solar_daily_mean_forecast(
 
     daily.name = "t2m_daily_mean"
     daily.attrs.update(
-        long_name="AIFS ENS v2 approximate local-solar daily-mean 2 m temperature",
+        long_name="Approximate local-solar daily-mean 2 m temperature",
         source_sampling="six-hourly",
         local_day_method="six-hour UTC-offset longitude bands",
     )

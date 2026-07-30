@@ -1,0 +1,78 @@
+# ECMWF IFS ENS raw-reforecast configuration.
+#
+# The standard_raw adapter reads the source Zarrs directly, constructs the
+# verified local-solar daily means lazily, and writes only canonical case-cache
+# fields beneath verification_results/ifs_ens.  It never changes raw stores.
+model:
+  name: ifs_ens
+  display_name: ECMWF IFS ENS
+  adapter: standard_reforecast_raw
+  ensemble: true
+  member_temperature_available: true
+
+paths:
+  raw_reforecast_root: /net/monsoon/marchakitus/IFS/IFS_ENS
+  threshold_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/thresholds/t2m_daily_mean_percentiles_1991_2020.zarr
+  era5_daily_temperature_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/daily/t2m_daily_mean.zarr
+  era5_hazard_store: /net/monsoon/kylehall/ERA5/heat_extremes_climatology/hazards/t2m_daily_mean_q95_hazards.zarr
+  verification_results_root: /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results
+
+variables:
+  raw_source_temperature: 2t
+  threshold_temperature: t2m_daily_mean_calendar_day_percentile
+
+observations:
+  daily_temperature_variable: t2m_daily_mean
+  event_variables:
+    hot_day_q95: hot_day_q95
+    heatwave_start_q95_2d: heatwave_start_q95_2d
+    heatwave_start_q95_3d: heatwave_start_q95_3d
+  temperature_units: K
+
+events:
+  percentile: 95.0
+
+selection:
+  years: [2022, 2023, 2024, 2025]
+  months: [6, 7, 8, 9]
+  # The current scorecard horizon: local-solar days 0 through 12.
+  forecast_days: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  map_forecast_days: [0, 5, 10, 12]
+
+chunking:
+  raw:
+    time: 1
+    number: 26
+    prediction_timedelta: 24
+    latitude: 180
+    longitude: 180
+  thresholds:
+    latitude: 180
+    longitude: 180
+  observations:
+    time: 31
+    latitude: 180
+    longitude: 180
+
+case_cache:
+  chunks:
+    initialization: 1
+    latitude: 180
+    longitude: 180
+    event: 3
+    quantile: 8
+  read_chunks:
+    initialization: 1
+    latitude: 180
+    longitude: 180
+
+metrics:
+  probability_bins: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  probability_decision_thresholds: [0.5]
+  interval_levels: [0.5, 0.8, 0.9, 0.95]
+
+regions:
+  file: regions.yaml
+
+output:
+  table_format: auto

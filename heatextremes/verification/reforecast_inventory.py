@@ -253,17 +253,21 @@ def inventory_metadata_csv(
     months: Iterable[int],
     max_forecast_day: int = MAX_SUPPORTED_FORECAST_DAY,
     excluded_model_names: Iterable[str] = ("gencast",),
-    allowed_external_model_names: Iterable[str] = ("aifs-ens-v2",),
+    allowed_external_model_names: Iterable[str] = ("aifs-ens-v2", "ifs-ens"),
+    included_model_names: Iterable[str] | None = None,
 ) -> tuple[list[ReforecastModelInventory], list[dict[str, str]]]:
     """Inventory models listed in the CSV registry, not arbitrary directories.
 
     The registry decides deterministic versus ensemble capability from
     ``N Members`` and permits a configured raw temperature source of either
-    ``2t`` or ``2m_temperature``. AIFS-ENS-v2 is allowed outside the generic
-    root because it is the established pilot source with ``*.zarr`` rather
-    than ``init_*.zarr`` names. The inventory additionally opens Zarr metadata
-    and coordinates for one store per selected month to derive a safe common
-    local-solar forecast-day range; it never reads temperature chunks.
+    ``2t`` or ``2m_temperature``. AIFS-ENS-v2 and IFS-ENS are allowed outside
+    the generic root because they use compatible ``*.zarr`` archives rather
+    than the usual ``init_*.zarr`` layout. ``included_model_names`` can select
+    one or more normalized result names (for example ``ifs_ens``) or registry
+    display names, without scanning metadata for unrelated models. The
+    inventory additionally opens Zarr metadata and coordinates for one store
+    per selected month to derive a safe common local-solar forecast-day range;
+    it never reads temperature chunks.
     """
     if not metadata_csv.is_file():
         raise FileNotFoundError(f"Model metadata CSV is missing: {metadata_csv}")
@@ -274,6 +278,7 @@ def inventory_metadata_csv(
     wanted = {(int(year), int(month)) for year in years for month in months}
     excluded = {name.casefold() for name in excluded_model_names}
     allowed_external = {name.casefold() for name in allowed_external_model_names}
+    included = {name.casefold() for name in included_model_names or ()}
     inventories: list[ReforecastModelInventory] = []
     skipped: list[dict[str, str]] = []
     seen_directories: set[Path] = set()
@@ -313,10 +318,12 @@ def inventory_metadata_csv(
                 if resolved in seen_directories:
                     skipped.append({"model": display_name, "reason": f"duplicate metadata directory: {directory}"})
                     continue
+                name = model_name_from_directory(directory)
+                if included and name.casefold() not in included and display_name.casefold() not in included:
+                    continue
                 if not directory.is_dir():
                     skipped.append({"model": display_name, "reason": f"metadata directory does not exist: {directory}"})
                     continue
-                name = model_name_from_directory(directory)
                 if name in seen_names:
                     skipped.append({"model": display_name, "reason": f"normalized model-name collision: {name}"})
                     continue

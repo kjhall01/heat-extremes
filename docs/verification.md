@@ -297,6 +297,9 @@ bash slurm/verification/submit_verification_workflow.sh \
   --max-concurrent 2
 ```
 
+For the concise operational view, including isolated per-model inventory
+manifests, see [`verification_pipeline.md`](verification_pipeline.md).
+
 ## Inventory and run all standard raw reforecasts
 
 Use the all-model launcher when raw model directories differ only by model
@@ -325,10 +328,10 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
 
 Use a replacement registry explicitly with `--metadata-csv /path/to/models.csv`.
 
-The registry's AIFS-ENS-v2 entry is deliberately included even though its raw
-path is outside the generic `reforecast` root. It is the established pilot
-source and uses its historical `*.zarr` filename convention; it receives the
-raw ensemble adapter, including bounded central-interval coverage diagnostics.
+The registry's AIFS-ENS-v2 and IFS-ENS entries are deliberately included even
+though their raw paths are outside the generic `reforecast` root. Both use a
+compatible `*.zarr` filename convention and receive the raw ensemble adapter,
+including bounded central-interval coverage diagnostics.
 
 Run it first with `--inventory-only` to inspect the generated manifest without
 submitting. The default source root is singular `reforecast`, following the

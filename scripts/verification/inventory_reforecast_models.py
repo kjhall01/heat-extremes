@@ -40,6 +40,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--years", type=int, nargs="+", default=[2022, 2023, 2024, 2025])
     parser.add_argument("--months", type=int, nargs="+", default=[6, 7, 8, 9])
     parser.add_argument(
+        "--models",
+        nargs="+",
+        help=(
+            "Optional normalized result names or registry display names to inventory "
+            "(for example: ifs_ens)."
+        ),
+    )
+    parser.add_argument(
         "--max-forecast-day",
         type=int,
         choices=range(15),
@@ -80,7 +88,21 @@ def main() -> None:
         years=args.years,
         months=args.months,
         max_forecast_day=args.max_forecast_day,
+        included_model_names=args.models,
     )
+    if args.models:
+        selected = {name.casefold() for name in args.models}
+        available = {
+            value
+            for item in inventories
+            for value in (item.name.casefold(), item.display_name.casefold())
+        }
+        unknown = selected.difference(available)
+        if unknown:
+            raise ValueError(
+                "Requested models were not found in the compatible metadata registry: "
+                f"{sorted(unknown)}"
+            )
     records: list[dict[str, object]] = []
     tasks: list[dict[str, object]] = []
     for item in inventories:
