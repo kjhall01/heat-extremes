@@ -19,7 +19,9 @@ def _write_store(dataset: xr.Dataset, path: Path) -> None:
 def test_standard_raw_adapter_builds_one_canonical_lead_without_compact_output(tmp_path: Path) -> None:
     source = tmp_path / "forecasts_example"
     source.mkdir()
-    longitude = np.asarray([0.0, 90.0, 180.0, 270.0])
+    # At this longitude, the local-midnight alignment needs source samples
+    # beyond a shorter 0--12 output selection to finish local forecast day 12.
+    longitude = np.asarray([90.0, 270.0])
     steps = np.arange(60, dtype="timedelta64[h]") * 6
     raw = xr.Dataset(
         {
@@ -97,7 +99,7 @@ def test_standard_raw_adapter_builds_one_canonical_lead_without_compact_output(t
                         "heatwave_start_q95_3d": "heatwave_start_q95_3d",
                     },
                 },
-                "selection": {"years": [2022], "months": [6], "forecast_days": list(range(15))},
+                "selection": {"years": [2022], "months": [6], "forecast_days": list(range(13))},
                 "metrics": {"probability_bins": [0.0, 0.5, 1.0], "interval_levels": [0.5]},
                 "regions": {"file": str(region_file)},
             },
@@ -113,6 +115,7 @@ def test_standard_raw_adapter_builds_one_canonical_lead_without_compact_output(t
         assert np.isclose(lead.ensemble_mean_temperature.mean().compute().item(), 301.0)
         assert np.isclose(lead.event_probabilities["hot_day_q95"].mean().compute().item(), 0.5)
         assert lead.interval_quantiles is not None
+        assert adapter.lead(opened, 12).forecast_day == 12
     finally:
         adapter.close_partition(opened)
 

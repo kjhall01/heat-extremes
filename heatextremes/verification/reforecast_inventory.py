@@ -179,28 +179,32 @@ def _with_available_forecast_days(
     *,
     max_forecast_day: int = MAX_SUPPORTED_FORECAST_DAY,
 ) -> ReforecastModelInventory:
-    """Use common valid leads across sampled selected months for one model.
+    """Use leads common to every raw initialization selected for one model.
 
-    The selected lead list must be valid for every submitted model/month task.
-    Inspecting one representative initialization per selected month is enough
-    because local-solar daily lead availability is determined by the store's
-    forecast-step coordinate, not by its temperature values.
+    The selected lead list must be valid for every submitted model/month task
+    *and* every initialization opened within those tasks.  Archives can mix
+    rollout lengths within a calendar month, so inspect metadata for every
+    selected store.  This reads only coordinates, never temperature chunks.
     """
     max_forecast_day = _validate_max_forecast_day(max_forecast_day)
-    stores_by_partition: dict[tuple[int, int], Path] = {}
+    stores_by_partition: dict[tuple[int, int], list[Path]] = defaultdict(list)
     for store in sorted(inventory.directory.glob(inventory.source_store_glob)):
         partition = store_year_month(store)
-        if partition in inventory.partitions and partition not in stores_by_partition:
-            stores_by_partition[partition] = store
+        if partition in inventory.partitions:
+            stores_by_partition[partition].append(store)
     available_sets: list[set[int]] = []
     errors: list[str] = []
-    for partition, store in sorted(stores_by_partition.items()):
-        try:
-            available_sets.append(
-                set(available_local_solar_forecast_days(store, inventory.source_temperature_variable))
-            )
-        except Exception as error:
-            errors.append(f"{partition[0]:04d}-{partition[1]:02d} metadata: {type(error).__name__}: {error}")
+    for partition, stores in sorted(stores_by_partition.items()):
+        for store in stores:
+            try:
+                available_sets.append(
+                    set(available_local_solar_forecast_days(store, inventory.source_temperature_variable))
+                )
+            except Exception as error:
+                errors.append(
+                    f"{partition[0]:04d}-{partition[1]:02d} {store.name} metadata: "
+                    f"{type(error).__name__}: {error}"
+                )
     if not available_sets:
         return replace(inventory, lead_inventory_errors=tuple(errors))
     common = {

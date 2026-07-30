@@ -118,9 +118,13 @@ class StandardReforecastAdapter(ModelAdapter):
             interval_quantiles=has_members,
         )
 
-        max_days = max(self.config.forecast_days) + 1
+        # Retain the complete project-standard local-solar construction window
+        # before selecting configured output leads.  A shorter requested lead
+        # list must not discard the source timesteps needed to finish its last
+        # local day (or to evaluate its 2-/3-day onset event).
         daily = self._helpers.local_solar_daily_mean_forecast(
-            raw[self._helpers.TEMPERATURE_NAME], max_days=max_days
+            raw[self._helpers.TEMPERATURE_NAME],
+            max_days=self._helpers.MAX_FORECAST_DAYS,
         ).rename({"time": "initialization", "number": "member"} if has_members else {"time": "initialization"})
 
         threshold_dataset = xr.open_zarr(

@@ -61,13 +61,13 @@ def test_inventory_uses_common_local_solar_leads_from_store_metadata(tmp_path: P
         )
         raw.to_zarr(path, mode="w", consolidated=True)
 
-    # The second store has one fewer complete local day. The generated model
-    # config must therefore use the common range rather than blindly using
-    # the historical 0--14 AIFS range.
+    # The second initialization in the *same month* has one fewer complete
+    # local day. The generated model config must inspect both stores and use
+    # their common range rather than sampling only the first store.
     write_store(source / "init_2022-06-01.zarr", step_count=60)
-    write_store(source / "init_2022-07-01.zarr", step_count=56)
+    write_store(source / "init_2022-06-15.zarr", step_count=56)
 
-    inventory = inventory_reforecast_root(root, years=[2022], months=[6, 7])
+    inventory = inventory_reforecast_root(root, years=[2022], months=[6])
     assert len(inventory) == 1
     discovered_days = inventory[0].forecast_days
     assert discovered_days
