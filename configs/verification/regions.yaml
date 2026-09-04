@@ -26,6 +26,16 @@ regions:
   west_africa:
     latitude: [0.0, 25.0]
     longitude: [-20.0, 20.0]
+  mali:
+    # Rectangular reporting box, not a political-boundary mask.
+    # Retained for internal comparison with the original Mali panel.
+    latitude: [10.0, 25.0]
+    longitude: [-12.0, 5.0]
+  nigeria:
+    # Rectangular reporting box, not a political-boundary mask.
+    # Default publishable West African alternative to the Mali box.
+    latitude: [4.0, 14.0]
+    longitude: [2.0, 15.0]
   east_africa:
     latitude: [-15.0, 20.0]
     longitude: [25.0, 55.0]

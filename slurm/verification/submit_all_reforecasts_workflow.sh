@@ -23,6 +23,15 @@ Options:
   --regions "NAME ..."          score this region subset after case caching (default: all configured)
   --probability-bins "P ..."    reliability-bin edges (default: config values)
   --decision-thresholds "P ..." probability cutoffs for POD/FAR (default: config value, 0.5)
+  --report-scorecard          submit the report heat-scorecard job after the normal chain
+  --report-scorecard-output DIRECTORY
+                              default: <result-root>/_report_scorecard
+  --report-scorecard-models "NAME ..."
+                              default: AIFS ENS v2, IFS ENS, AIFS v2, Aurora, GraphCast
+  --report-scorecard-regions "NAME ..."
+                              default: "mali nigeria global"
+  --report-scorecard-forecast-days "N ..."
+                              default: "0 3 6 9 12"
   --overwrite                   replace only configured partial result partitions
   --inventory-only              write/report inventory but do not submit jobs
 EOF
@@ -41,6 +50,12 @@ MAX_CONCURRENT=1
 REGIONS_TEXT=""
 PROBABILITY_BINS_TEXT=""
 DECISION_THRESHOLDS_TEXT=""
+REPORT_SCORECARD=0
+REPORT_SCORECARD_OUTPUT=""
+REPORT_SCORECARD_MODELS_TEXT="aifs_ens_v2 ifs_ens aifs_v2 aurora_e2s graphcast_e2s"
+REPORT_SCORECARD_MODELS_EXPLICIT=0
+REPORT_SCORECARD_REGIONS_TEXT="mali nigeria global"
+REPORT_SCORECARD_FORECAST_DAYS_TEXT="0 3 6 9 12"
 OVERWRITE_VALUE=0
 INVENTORY_ONLY=0
 while (( $# )); do
@@ -58,6 +73,11 @@ while (( $# )); do
         --regions) REGIONS_TEXT="$2"; shift 2 ;;
         --probability-bins) PROBABILITY_BINS_TEXT="$2"; shift 2 ;;
         --decision-thresholds) DECISION_THRESHOLDS_TEXT="$2"; shift 2 ;;
+        --report-scorecard) REPORT_SCORECARD=1; shift ;;
+        --report-scorecard-output) REPORT_SCORECARD_OUTPUT="$2"; shift 2 ;;
+        --report-scorecard-models) REPORT_SCORECARD_MODELS_TEXT="$2"; REPORT_SCORECARD_MODELS_EXPLICIT=1; shift 2 ;;
+        --report-scorecard-regions) REPORT_SCORECARD_REGIONS_TEXT="$2"; shift 2 ;;
+        --report-scorecard-forecast-days) REPORT_SCORECARD_FORECAST_DAYS_TEXT="$2"; shift 2 ;;
         --overwrite) OVERWRITE_VALUE=1; shift ;;
         --inventory-only) INVENTORY_ONLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -129,9 +149,25 @@ plot_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterany:${aggr
     --output="${RESULT_ROOT}/logs/reforecast_plot_%j.out" --error="${RESULT_ROOT}/logs/reforecast_plot_%j.err" \
     "${SLURM_DIRECTORY}/submit_reforecast_plotting.sbatch")"
 
+report_scorecard_job=""
+if (( REPORT_SCORECARD )); then
+    REPORT_SCORECARD_OUTPUT="${REPORT_SCORECARD_OUTPUT:-${RESULT_ROOT}/_report_scorecard}"
+    if (( ! REPORT_SCORECARD_MODELS_EXPLICIT )) && [[ -n "${MODELS_TEXT}" ]]; then
+        REPORT_SCORECARD_MODELS_TEXT="${MODELS_TEXT}"
+    fi
+    report_scorecard_job="$(sbatch --parsable \
+        "${EXPORT_ARGUMENT},REPORT_SCORECARD_OUTPUT_DIRECTORY=${REPORT_SCORECARD_OUTPUT},REPORT_SCORECARD_MODELS=${REPORT_SCORECARD_MODELS_TEXT},REPORT_SCORECARD_REGIONS=${REPORT_SCORECARD_REGIONS_TEXT},REPORT_SCORECARD_FORECAST_DAYS=${REPORT_SCORECARD_FORECAST_DAYS_TEXT},REPORT_SCORECARD_YEARS=${YEARS_TEXT},REPORT_SCORECARD_MONTHS=${MONTHS_TEXT}" \
+        --dependency="afterany:${plot_job}" \
+        --output="${RESULT_ROOT}/logs/report_scorecard_%j.out" --error="${RESULT_ROOT}/logs/report_scorecard_%j.err" \
+        "${SLURM_DIRECTORY}/submit_report_scorecard.sbatch")"
+fi
+
 printf 'Inventory: %s (%s tasks)\n' "${MANIFEST}" "${TASK_COUNT}"
 printf 'Submitted reforecast case-cache array: %s\n' "${cache_job}"
 printf 'Submitted cache-backed metric array: %s (afterany:%s)\n' "${metrics_job}" "${cache_job}"
 printf 'Submitted tolerant aggregation: %s (afterany:%s)\n' "${aggregate_job}" "${metrics_job}"
 printf 'Submitted aggregate-only all-model plotting: %s (afterany:%s)\n' "${plot_job}" "${aggregate_job}"
+if [[ -n "${report_scorecard_job}" ]]; then
+    printf 'Submitted report heat scorecard: %s (afterany:%s)\n' "${report_scorecard_job}" "${plot_job}"
+fi
 printf 'Monitor: squeue -u "%s" -j %s,%s,%s,%s\n' "${USER}" "${cache_job}" "${metrics_job}" "${aggregate_job}" "${plot_job}"

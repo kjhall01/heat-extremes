@@ -138,3 +138,70 @@ bash slurm/verification/submit_model_temperature_q95_workflow.sh \
 
 This workflow writes only a global q95 field plus temporary per-band daily
 staging stores beneath `model_climatology/`; it does not touch raw IFS data.
+
+## Report scorecard (Mali, Nigeria, global)
+
+The static notebook [`model_scorecards.ipynb`](../model_scorecards.ipynb) is
+useful for figure development.  For the report, submit the reproducible batch
+version instead.  It first builds or resumes the canonical cases and then
+writes the scorecard only if every requested model/month/lead is present.  A
+missing cache slice is an error, never a quietly grey or NaN report cell.
+
+```bash
+bash slurm/verification/submit_all_reforecasts_workflow.sh \
+  --models "aifs_ens_v2 ifs_ens aifs_v2 aurora_e2s graphcast_e2s" \
+  --years "2022 2023 2024 2025" --months "6 7 8 9" \
+  --max-forecast-day 12 --max-concurrent 1 \
+  --regions "global mali nigeria" \
+  --report-scorecard
+```
+
+The final job writes these files beneath
+`<result-root>/_report_scorecard/`:
+
+- `heat_report_scorecard.csv` and `heat_report_scorecard.png`;
+- `graphcast_vs_ifs_direction_check.csv`, which makes the direction of every
+  GraphCast-minus-IFS difference explicit;
+- `heat_report_scorecard_metadata.json`, including the scientific definitions
+  and source paths.
+
+The scorecard is deliberately **raw**, with no forecast bias correction.  Its
+temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day.  Its POD
+and FAR are *deterministic*: the model's deterministic/ensemble-mean T2M is
+tested against ERA5's 1991--2020 local calendar-day q95.  The native hot-day
+exceedance probability is evaluated separately by Brier score.  Thus a claim
+that a model is "better probabilistically" must refer to the Brier column,
+not to the deterministic POD/FAR columns.  `mali` and `nigeria` are explicitly
+labelled rectangular reporting boxes, not country-boundary masks.
+
+### Global Z500 + T2M scorecard
+
+Z500 cannot be reconstructed from the heat case cache, which intentionally
+stores T2M and event fields only.  The companion workflow reads the registered
+raw reforecast stores in bounded model/month tasks, checks the actual source
+variable and units first, and then joins exact global Z500 RMSE to the global
+raw-T2M scorecard:
+
+```bash
+ERA5_Z500_STORE=/net/path/to/consolidated_era5_pressure_level.zarr \
+ERA5_Z500_VARIABLE=z \
+bash slurm/verification/submit_global_z500_scorecard.sh \
+  --result-root /net/monsoon/kylehall/ERA5/heat_extremes_reforecast_verification/verification_results
+```
+
+This requires a locally available ERA5 pressure-level Zarr; the existing ARCO
+cache is surface-only and cannot supply Z500.  The preflight output
+`_global_z500_scorecard/z500_preflight.json` records source-variable and unit
+availability.  In the checked-in model registry, IFS ENS currently advertises
+only `2t`, so its Z500 row will be reported as unavailable unless a Z500 source
+is added to that registry/archive.  It is never silently omitted.  The Z500
+jobs use the common initialization intersection among the Z500-capable models;
+the heat scorecard's metadata separately records the all-five-model common
+intersection used for T2M.
+
+`global_model_scorecard.csv` contains `z500_rmse`, `t2m_rmse_all`, and
+`t2m_rmse_hot`; it preserves the heat labels `0, 3, 6, 9, 12` and records the
+paired instantaneous Z500 lead hours (`0, 72, 144, 216, 288`) in a separate
+column.  This is intentionally configurable with `--lead-hours`: local-solar
+daily T2M has longitude-dependent valid dates, so it has no single identical
+instantaneous Z500 target time.
