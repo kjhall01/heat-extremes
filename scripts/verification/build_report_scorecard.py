@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold-store", type=Path, default=DEFAULT_THRESHOLD_STORE)
     parser.add_argument("--threshold-variable", default=DEFAULT_THRESHOLD_VARIABLE)
     parser.add_argument("--threshold-percentile", type=float, default=95.0)
+    parser.add_argument(
+        "--no-frequency-change-maps",
+        action="store_false",
+        dest="include_frequency_change_maps",
+        help="Skip the observed hot-day-frequency map column when regenerating tables only.",
+    )
     return parser.parse_args()
 
 
@@ -73,6 +79,7 @@ def main() -> None:
         years=args.years,
         months=args.months,
         forecast_days=args.forecast_days,
+        include_frequency_change_maps=args.include_frequency_change_maps,
     )
     print(f"Wrote {len(scorecard)} scorecard rows to {args.output_directory}")
 

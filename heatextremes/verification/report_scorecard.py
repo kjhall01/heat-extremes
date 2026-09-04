@@ -19,6 +19,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from dask.diagnostics import ProgressBar
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import TwoSlopeNorm
+
+try:  # Cartopy is included in the project environment but optional for tests/lightweight installs.
+    import cartopy.crs as ccrs
+except ModuleNotFoundError:  # pragma: no cover - exercised only without the optional plotting dependency.
+    ccrs = None
 
 from .alignment import map_to_forecast_grid
 from .case_cache_reader import (
@@ -29,7 +36,7 @@ from .case_cache_reader import (
     LEGACY_AIFS_MODEL_NAMES,
     open_model_intermediates,
 )
-from .io import now_utc, write_json_atomic, write_table_atomic
+from .io import now_utc, write_json_atomic, write_netcdf_atomic, write_table_atomic
 from .regions import Region, region_mask
 from .weighting import cosine_latitude_weights
 
@@ -330,33 +337,218 @@ def scorecard_direction_table(
 
 
 _PLOT_METRICS = (
-    ("rmse_hot", "Observed-hot RMSE (K)", False),
-    ("pod_deterministic", "Deterministic POD", True),
-    ("far_deterministic", "Deterministic FAR", False),
-    ("brier_score_probabilistic", "Probabilistic Brier score", False),
+    ("rmse_hot", "Hot-day\nRMSE (K)", False),
+    ("pod_deterministic", "Deterministic\nPOD", True),
+    ("far_deterministic", "Deterministic\nFAR", False),
+    ("brier_score_probabilistic", "Probabilistic\nBrier", False),
 )
 
 
-def plot_scorecard(scorecard: pd.DataFrame, path: Path) -> None:
-    """Write compact lead-line panels; exact numbers remain in the CSV."""
-    regions = list(scorecard["region"].drop_duplicates())
-    figure, axes = plt.subplots(
-        len(regions), len(_PLOT_METRICS), figsize=(4.4 * len(_PLOT_METRICS), 3.2 * len(regions)), squeeze=False
+def hot_day_frequency_change(
+    daily_temperature: xr.DataArray,
+    threshold: xr.DataArray,
+    region: Region,
+    *,
+    validation_years: Sequence[int],
+    climatology_years: Sequence[int],
+    months: Sequence[int],
+) -> xr.DataArray:
+    """Observed JJAS q95 incidence change for the map portion of the scorecard."""
+    selected_years = sorted(set(validation_years).union(climatology_years))
+    selected = daily_temperature.where(
+        daily_temperature.time.dt.year.isin(selected_years)
+        & daily_temperature.time.dt.month.isin(months),
+        drop=True,
     )
-    for row, region in enumerate(regions):
-        regional = scorecard[scorecard["region"].eq(region)]
-        for column, (metric, label, bounded) in enumerate(_PLOT_METRICS):
-            axis = axes[row, column]
-            for model, values in regional.groupby("model_label", sort=False):
-                values = values.sort_values("forecast_day")
-                axis.plot(values["forecast_day"], values[metric], marker="o", label=model)
-            axis.set(title=f"{region}: {label}", xlabel="Local-solar forecast day", ylabel=label)
-            if bounded:
-                axis.set_ylim(0, 1)
-            axis.grid(alpha=0.3)
-            if row == 0 and column == len(_PLOT_METRICS) - 1:
-                axis.legend(fontsize="small", bbox_to_anchor=(1.02, 1), loc="upper left")
-    figure.tight_layout()
+    selected = selected.where(region_mask(selected, region), drop=True)
+    mapped_threshold = map_to_forecast_grid(threshold, selected, method="linear")
+    q95 = threshold_for_calendar_days(mapped_threshold, selected.time.dt.dayofyear)
+    hot = selected > q95
+    validation = hot.where(hot.time.dt.year.isin(validation_years)).mean("time", skipna=True)
+    climatology = hot.where(hot.time.dt.year.isin(climatology_years)).mean("time", skipna=True)
+    return (100 * (validation / climatology - 1)).rename("hot_day_frequency_change")
+
+
+def compute_frequency_change_maps(
+    *,
+    daily_temperature_store: str | Path,
+    threshold: xr.DataArray,
+    regions: Mapping[str, Region],
+    validation_years: Sequence[int],
+    climatology_years: Sequence[int],
+    months: Sequence[int],
+) -> dict[str, xr.DataArray]:
+    """Compute bounded regional map inputs once; the global row is metrics-only."""
+    source = xr.open_zarr(daily_temperature_store, consolidated=True, chunks="auto")
+    try:
+        if "t2m_daily_mean" not in source:
+            raise KeyError("ERA5 daily-temperature store is missing 't2m_daily_mean'")
+        daily_temperature = source["t2m_daily_mean"]
+        maps: dict[str, xr.DataArray] = {}
+        for name, region in regions.items():
+            # A map for the global scorecard is both less useful to a report
+            # designer and disproportionately expensive. Its global metrics
+            # still appear in the scorecard row below the regional panels.
+            if region.latitude_min is None and region.longitude_min is None:
+                continue
+            print(f"Computing observed hot-day frequency-change map: {name}", flush=True)
+            with ProgressBar():
+                maps[name] = hot_day_frequency_change(
+                    daily_temperature,
+                    threshold,
+                    region,
+                    validation_years=validation_years,
+                    climatology_years=climatology_years,
+                    months=months,
+                ).compute()
+        return maps
+    finally:
+        source.close()
+
+
+def _relative_performance(values: pd.DataFrame, reference_model: str, higher_is_better: bool) -> pd.DataFrame:
+    reference = values.loc[reference_model]
+    relative = values.divide(reference, axis="columns") if higher_is_better else values.rdiv(reference, axis="columns")
+    return relative.replace([np.inf, -np.inf], np.nan) - 1.0
+
+
+def _format_metric(value: float, metric: str) -> str:
+    if not np.isfinite(value):
+        return "—"
+    return f"{value:.3f}" if metric == "brier_score_probabilistic" else f"{value:.2f}"
+
+
+def plot_scorecard(
+    scorecard: pd.DataFrame,
+    path: Path,
+    *,
+    frequency_change_maps: Mapping[str, xr.DataArray] | None = None,
+    regions: Mapping[str, Region],
+    reference_model: str = "aifs_ens_v2",
+) -> None:
+    """Write the map-plus-scorecard composition used for the report figure.
+
+    Cell colour encodes relative performance versus the AIFS ENS v2 mean;
+    absolute values are printed in every cell.  Red is worse and blue is
+    better, while the CSV remains the precise source for layout work.
+    """
+    region_names = list(scorecard["region"].drop_duplicates())
+    if reference_model not in set(scorecard["model"]):
+        reference_model = str(scorecard["model"].iloc[0])
+    frequency_change_maps = frequency_change_maps or {}
+    cell_norm = TwoSlopeNorm(vmin=-0.5, vcenter=0.0, vmax=0.5)
+    cell_cmap = plt.colormaps["RdBu"].copy()
+    cell_cmap.set_bad("#e5e7eb")
+    map_norm = TwoSlopeNorm(vmin=-100.0, vcenter=0.0, vmax=500.0)
+    map_cmap = plt.colormaps["RdBu_r"].copy()
+    map_cmap.set_bad("#e5e7eb")
+    figure = plt.figure(
+        figsize=(3.8 + 2.15 * len(_PLOT_METRICS), 2.55 + 2.65 * len(region_names)), facecolor="white"
+    )
+    grid = figure.add_gridspec(
+        len(region_names),
+        len(_PLOT_METRICS) + 2,
+        width_ratios=[1.8, *([1.25] * len(_PLOT_METRICS)), 0.10],
+        wspace=0.35,
+        hspace=0.48,
+    )
+    for row, region_name in enumerate(region_names):
+        region = regions[region_name]
+        map_axis = (
+            figure.add_subplot(grid[row, 0], projection=ccrs.PlateCarree())
+            if ccrs is not None
+            else figure.add_subplot(grid[row, 0])
+        )
+        frequency_map = frequency_change_maps.get(region_name)
+        if frequency_map is None:
+            message = (
+                "Global\nmetrics only"
+                if region.latitude_min is None and region.longitude_min is None
+                else "Map\ndisabled"
+            )
+            map_axis.text(
+                0.5,
+                0.5,
+                message,
+                transform=map_axis.transAxes,
+                ha="center",
+                va="center",
+                fontsize=10,
+            )
+            if ccrs is not None:
+                map_axis.set_global()
+                map_axis.coastlines(linewidth=0.55)
+        else:
+            map_kwargs = {"transform": ccrs.PlateCarree()} if ccrs is not None else {}
+            image = map_axis.pcolormesh(
+                frequency_map.longitude,
+                frequency_map.latitude,
+                frequency_map,
+                cmap=map_cmap,
+                norm=map_norm,
+                shading="auto",
+                rasterized=True,
+                **map_kwargs,
+            )
+            map_axis.set(
+                title=f"{region_name.replace('_', ' ').title()}\nobserved hot-day change",
+                xlabel="Longitude",
+                ylabel="Latitude",
+            )
+            if ccrs is not None:
+                map_axis.coastlines(linewidth=0.55)
+            if ccrs is not None and region.latitude_min is not None and region.longitude_min is not None:
+                map_axis.set_extent(
+                    [region.longitude_min, region.longitude_max, region.latitude_min, region.latitude_max],
+                    crs=ccrs.PlateCarree(),
+                )
+            figure.colorbar(image, ax=map_axis, orientation="horizontal", pad=0.12, label="Change (%)")
+        regional = scorecard[scorecard["region"].eq(region_name)]
+        models = list(regional["model"].drop_duplicates())
+        model_labels = (
+            regional.drop_duplicates("model").set_index("model").loc[models, "model_label"].tolist()
+        )
+        for column, (metric, label, higher_is_better) in enumerate(_PLOT_METRICS, start=1):
+            axis = figure.add_subplot(grid[row, column])
+            values = regional.pivot(index="model", columns="forecast_day", values=metric).reindex(index=models)
+            relative = _relative_performance(values, reference_model, higher_is_better)
+            axis.imshow(
+                np.ma.masked_invalid(relative.to_numpy()),
+                cmap=cell_cmap,
+                norm=cell_norm,
+                interpolation="none",
+                aspect="auto",
+                origin="upper",
+            )
+            for model_index, model in enumerate(models):
+                for lead_index, forecast_day in enumerate(values.columns):
+                    value = values.loc[model, forecast_day]
+                    axis.text(
+                        lead_index,
+                        model_index,
+                        _format_metric(float(value), metric),
+                        ha="center",
+                        va="center",
+                        fontsize=7.4,
+                    )
+            axis.set_xticks(range(len(values.columns)), labels=[str(value) for value in values.columns])
+            if row == 0:
+                axis.set_title(label, fontsize=10, pad=11)
+            if column == 1:
+                axis.set_yticks(range(len(models)), labels=model_labels, fontsize=8)
+            else:
+                axis.set_yticks([])
+            if row == len(region_names) - 1:
+                axis.set_xlabel("Forecast day")
+            axis.tick_params(length=0)
+    colorbar_axis = figure.add_subplot(grid[:, -1])
+    colorbar = figure.colorbar(ScalarMappable(norm=cell_norm, cmap=cell_cmap), cax=colorbar_axis)
+    colorbar.set_label("Relative performance\n(blue = better)", fontsize=8)
+    figure.suptitle(
+        "Raw T2M heat forecast scorecard — ERA5 1991–2020 q95 threshold; no bias correction",
+        fontsize=12,
+        y=1.01,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(figure)
@@ -377,6 +569,7 @@ def build_report_scorecard(
     years: Sequence[int] = (2022, 2023, 2024, 2025),
     months: Sequence[int] = (6, 7, 8, 9),
     forecast_days: Sequence[int] = (0, 3, 6, 9, 12),
+    include_frequency_change_maps: bool = True,
 ) -> pd.DataFrame:
     """Build the CSV, direction check, PNG, and scientific provenance record."""
     output = Path(output_directory)
@@ -399,6 +592,18 @@ def build_report_scorecard(
         scorecard = compute_scorecard(
             datasets, threshold=threshold, regions=regions, forecast_days=forecast_days
         )
+        frequency_change_maps = (
+            compute_frequency_change_maps(
+                daily_temperature_store=era5_daily_temperature_store,
+                threshold=threshold,
+                regions=regions,
+                validation_years=years,
+                climatology_years=tuple(range(1991, 2021)),
+                months=months,
+            )
+            if include_frequency_change_maps
+            else {}
+        )
     finally:
         threshold_source.close()
         for dataset in datasets.values():
@@ -407,7 +612,17 @@ def build_report_scorecard(
     write_table_atomic(scorecard, output / "heat_report_scorecard.csv")
     direction = scorecard_direction_table(scorecard)
     write_table_atomic(direction, output / "graphcast_vs_ifs_direction_check.csv")
-    plot_scorecard(scorecard, output / "heat_report_scorecard.png")
+    for region_name, frequency_change_map in frequency_change_maps.items():
+        write_netcdf_atomic(
+            frequency_change_map.to_dataset(),
+            output / f"observed_hot_day_frequency_change_{region_name}.nc",
+        )
+    plot_scorecard(
+        scorecard,
+        output / "heat_report_scorecard.png",
+        frequency_change_maps=frequency_change_maps,
+        regions=regions,
+    )
     write_json_atomic(
         {
             "created_at": now_utc(),
@@ -429,6 +644,14 @@ def build_report_scorecard(
             "probabilistic_definition": (
                 "Native model hot-day exceedance probability; Brier score is reported without a decision cutoff."
             ),
+            "map_definition": (
+                "Map panels show 100 * (2022-2025 JJAS observed local-calendar-day q95 hot-day frequency / "
+                "1991-2020 JJAS frequency - 1), using ERA5 only. The global row is metrics-only."
+            ),
+            "map_files": [
+                f"observed_hot_day_frequency_change_{region_name}.nc"
+                for region_name in frequency_change_maps
+            ],
             "comparison_note": (
                 "All model comparisons use the exact intersection of selected JJAS initialization dates. "
                 "No significance testing is implied."

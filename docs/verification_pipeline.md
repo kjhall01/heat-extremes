@@ -165,6 +165,12 @@ The final job writes these files beneath
 - `heat_report_scorecard_metadata.json`, including the scientific definitions
   and source paths.
 
+The PNG preserves the report's map-plus-scorecard composition: Mali and
+Nigeria each have an ERA5 observed hot-day-incidence-change map alongside
+absolute-value, colour-coded metric cells.  The map inputs are additionally
+saved as `observed_hot_day_frequency_change_<region>.nc`; the global row is
+metrics-only so it does not trigger an unnecessary full-world map reduction.
+
 The scorecard is deliberately **raw**, with no forecast bias correction.  Its
 temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day.  Its POD
 and FAR are *deterministic*: the model's deterministic/ensemble-mean T2M is

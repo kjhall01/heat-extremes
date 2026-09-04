@@ -13,7 +13,11 @@ from heatextremes.verification.global_z500 import (
     global_z500_partition_statistics,
 )
 from heatextremes.verification.regions import Region
-from heatextremes.verification.report_scorecard import score_lead
+from heatextremes.verification.report_scorecard import (
+    hot_day_frequency_change,
+    plot_scorecard,
+    score_lead,
+)
 
 
 def test_report_scorecard_keeps_deterministic_and_probabilistic_metrics_distinct() -> None:
@@ -165,3 +169,65 @@ def test_global_z500_aggregate_excludes_a_model_with_any_unavailable_partition(t
     assert combined["model"].tolist() == ["graphcast_e2s"]
     unavailable = pd.read_csv(output / "global_z500_unavailable.csv")
     assert unavailable["model"].tolist() == ["ifs_ens"]
+
+
+def test_report_plot_combines_frequency_map_and_absolute_metric_cells(tmp_path: Path) -> None:
+    rows = []
+    for model, label, adjustment in (("aifs_ens_v2", "AIFS ENS v2 mean", 0.0), ("graphcast_e2s", "GraphCast", 0.1)):
+        for forecast_day in (0, 3):
+            rows.append(
+                {
+                    "region": "nigeria",
+                    "model": model,
+                    "model_label": label,
+                    "forecast_day": forecast_day,
+                    "rmse_hot": 1.0 + adjustment,
+                    "pod_deterministic": 0.5 - adjustment,
+                    "far_deterministic": 0.2 + adjustment,
+                    "brier_score_probabilistic": 0.1 + adjustment,
+                }
+            )
+    frequency_change = xr.DataArray(
+        np.array([[10.0, 20.0], [30.0, 40.0]]),
+        dims=("latitude", "longitude"),
+        coords={"latitude": [4.0, 14.0], "longitude": [2.0, 15.0]},
+    )
+    path = tmp_path / "scorecard.png"
+
+    plot_scorecard(
+        pd.DataFrame(rows),
+        path,
+        frequency_change_maps={"nigeria": frequency_change},
+        regions={"nigeria": Region("nigeria", 4.0, 14.0, 2.0, 15.0)},
+    )
+
+    assert path.is_file()
+
+
+def test_frequency_change_map_uses_observed_hot_day_rates() -> None:
+    temperature = xr.DataArray(
+        np.array([2.0, 1.0, 2.0, 2.0])[:, None, None],
+        dims=("time", "latitude", "longitude"),
+        coords={
+            "time": np.array(["1991-06-01", "1991-06-02", "2022-06-01", "2022-06-02"], dtype="datetime64[ns]"),
+            "latitude": [10.0],
+            "longitude": [5.0],
+        },
+    )
+    threshold = xr.DataArray(
+        np.array([[[1.5]], [[1.5]]]),
+        dims=("dayofyear", "latitude", "longitude"),
+        coords={"dayofyear": [152, 153], "latitude": [10.0], "longitude": [5.0]},
+    )
+
+    result = hot_day_frequency_change(
+        temperature,
+        threshold,
+        Region("box", 5.0, 15.0, 0.0, 10.0),
+        validation_years=[2022],
+        climatology_years=[1991],
+        months=[6],
+    )
+
+    # Validation hot-day frequency is 1.0; climatology is 0.5.
+    assert result.item() == pytest.approx(100.0)
