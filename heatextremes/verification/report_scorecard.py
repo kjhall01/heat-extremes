@@ -24,8 +24,10 @@ from matplotlib.colors import TwoSlopeNorm
 
 try:  # Cartopy is included in the project environment but optional for tests/lightweight installs.
     import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
 except ModuleNotFoundError:  # pragma: no cover - exercised only without the optional plotting dependency.
     ccrs = None
+    cfeature = None
 
 from .alignment import map_to_forecast_grid
 from .case_cache_reader import (
@@ -430,27 +432,34 @@ def plot_scorecard(
 
     Cell colour encodes relative performance versus the AIFS ENS v2 mean;
     absolute values are printed in every cell.  Red is worse and blue is
-    better, while the CSV remains the precise source for layout work.
+    better.  The layout intentionally follows ``model_scorecards.ipynb`` so
+    the report PNG is usable as a stand-alone figure rather than a compact
+    diagnostic.
     """
     region_names = list(scorecard["region"].drop_duplicates())
     if reference_model not in set(scorecard["model"]):
         reference_model = str(scorecard["model"].iloc[0])
     frequency_change_maps = frequency_change_maps or {}
-    cell_norm = TwoSlopeNorm(vmin=-0.5, vcenter=0.0, vmax=0.5)
+    # Each shade represents the percent departure from the reference model,
+    # after orienting every metric so positive is better.  Keep the notebook's
+    # generous +/-100% scale: a compact +/-50% scale made ordinary differences
+    # look saturated and made the text hard to read in the report version.
+    cell_norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
     cell_cmap = plt.colormaps["RdBu"].copy()
     cell_cmap.set_bad("#e5e7eb")
     map_norm = TwoSlopeNorm(vmin=-100.0, vcenter=0.0, vmax=500.0)
     map_cmap = plt.colormaps["RdBu_r"].copy()
     map_cmap.set_bad("#e5e7eb")
     figure = plt.figure(
-        figsize=(3.8 + 2.15 * len(_PLOT_METRICS), 2.55 + 2.65 * len(region_names)), facecolor="white"
+        figsize=(8.5 + 3.35 * len(_PLOT_METRICS), 1.8 + 3.15 * len(region_names)),
+        facecolor="white",
     )
     grid = figure.add_gridspec(
         len(region_names),
         len(_PLOT_METRICS) + 2,
-        width_ratios=[1.8, *([1.25] * len(_PLOT_METRICS)), 0.10],
+        width_ratios=[1.50, *([1.52] * len(_PLOT_METRICS)), 0.12],
         wspace=0.35,
-        hspace=0.48,
+        hspace=0.45,
     )
     for row, region_name in enumerate(region_names):
         region = regions[region_name]
@@ -473,11 +482,11 @@ def plot_scorecard(
                 transform=map_axis.transAxes,
                 ha="center",
                 va="center",
-                fontsize=10,
+                fontsize=12,
             )
             if ccrs is not None:
                 map_axis.set_global()
-                map_axis.coastlines(linewidth=0.55)
+                map_axis.coastlines(color="#4a4a4a", linewidth=0.65)
         else:
             map_kwargs = {"transform": ccrs.PlateCarree()} if ccrs is not None else {}
             image = map_axis.pcolormesh(
@@ -490,19 +499,70 @@ def plot_scorecard(
                 rasterized=True,
                 **map_kwargs,
             )
-            map_axis.set(
-                title=f"{region_name.replace('_', ' ').title()}\nobserved hot-day change",
-                xlabel="Longitude",
-                ylabel="Latitude",
-            )
             if ccrs is not None:
-                map_axis.coastlines(linewidth=0.55)
-            if ccrs is not None and region.latitude_min is not None and region.longitude_min is not None:
-                map_axis.set_extent(
-                    [region.longitude_min, region.longitude_max, region.latitude_min, region.latitude_max],
-                    crs=ccrs.PlateCarree(),
+                # Coastlines give geographic orientation; country boundaries
+                # make clear that Nigeria is a reporting box, rather than a
+                # political-boundary average.
+                map_axis.coastlines(color="#4a4a4a", linewidth=0.65)
+                if cfeature is not None:
+                    map_axis.add_feature(
+                        cfeature.BORDERS.with_scale("50m"),
+                        edgecolor="#4a4a4a",
+                        linewidth=0.55,
+                        zorder=3,
+                    )
+                map_axis.spines["geo"].set_visible(True)
+                map_axis.spines["geo"].set_color("#1f2937")
+                map_axis.spines["geo"].set_linewidth(0.8)
+            if region.latitude_min is not None and region.longitude_min is not None:
+                if ccrs is not None:
+                    map_axis.set_extent(
+                        [
+                            region.longitude_min,
+                            region.longitude_max,
+                            region.latitude_min,
+                            region.latitude_max,
+                        ],
+                        crs=ccrs.PlateCarree(),
+                    )
+                else:
+                    map_axis.set(
+                        xlim=(region.longitude_min, region.longitude_max),
+                        ylim=(region.latitude_min, region.latitude_max),
+                    )
+            map_axis.set_facecolor("#f5f7fa")
+            map_axis.set_title(
+                f"{region_name.replace('_', ' ').title()}\nobserved hot-day change",
+                fontsize=12,
+                fontweight="semibold",
+                pad=16,
+            )
+            if ccrs is None:
+                map_axis.set(xlabel="Longitude", ylabel="Latitude")
+            elif region.latitude_min is not None and region.longitude_min is not None:
+                gridlines = map_axis.gridlines(
+                    draw_labels=True,
+                    linewidth=0.35,
+                    color="#6b7280",
+                    alpha=0.5,
+                    linestyle=":",
+                    x_inline=False,
+                    y_inline=False,
                 )
-            figure.colorbar(image, ax=map_axis, orientation="horizontal", pad=0.12, label="Change (%)")
+                gridlines.top_labels = False
+                gridlines.right_labels = False
+                gridlines.xlabel_style = {"size": 8, "color": "#374151"}
+                gridlines.ylabel_style = {"size": 8, "color": "#374151"}
+            map_colorbar = figure.colorbar(
+                image,
+                ax=map_axis,
+                orientation="horizontal",
+                pad=0.12,
+                ticks=[-80, -40, 0, 200, 400],
+            )
+            map_colorbar.outline.set_visible(False)
+            map_colorbar.set_label("Extreme-incidence rate change (%)", fontsize=8.5, color="#374151")
+            map_colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
         regional = scorecard[scorecard["region"].eq(region_name)]
         models = list(regional["model"].drop_duplicates())
         model_labels = (
@@ -520,37 +580,78 @@ def plot_scorecard(
                 aspect="auto",
                 origin="upper",
             )
+            axis.set_xlim(-0.5, len(values.columns) - 0.5)
+            axis.set_ylim(len(models) - 0.5, -0.5)
             for model_index, model in enumerate(models):
                 for lead_index, forecast_day in enumerate(values.columns):
                     value = values.loc[model, forecast_day]
+                    relative_value = relative.loc[model, forecast_day]
                     axis.text(
                         lead_index,
                         model_index,
                         _format_metric(float(value), metric),
                         ha="center",
                         va="center",
-                        fontsize=7.4,
+                        color=(
+                            "white"
+                            if np.isfinite(relative_value)
+                            and (relative_value < -0.35 or relative_value > 0.35)
+                            else "#263238"
+                        ),
+                        fontsize=10,
+                        fontweight="bold" if model == reference_model else "normal",
                     )
-            axis.set_xticks(range(len(values.columns)), labels=[str(value) for value in values.columns])
+            axis.set_xticks(
+                range(len(values.columns)), labels=[str(value) for value in values.columns], fontsize=10
+            )
             if row == 0:
-                axis.set_title(label, fontsize=10, pad=11)
+                axis.set_title(label, fontsize=12, fontweight="semibold", pad=16)
             if column == 1:
-                axis.set_yticks(range(len(models)), labels=model_labels, fontsize=8)
+                axis.set_yticks(
+                    range(len(models)),
+                    labels=model_labels,
+                    fontsize=9,
+                    rotation=90,
+                    va="center",
+                    ha="center",
+                )
+                for tick, model in zip(axis.get_yticklabels(), models):
+                    tick.set_fontweight("bold" if model == reference_model else "normal")
             else:
                 axis.set_yticks([])
             if row == len(region_names) - 1:
-                axis.set_xlabel("Forecast day")
-            axis.tick_params(length=0)
+                axis.set_xlabel("Forecast day", fontsize=10, labelpad=7)
+            axis.tick_params(axis="x", length=0, pad=3)
+            axis.tick_params(axis="y", length=0, pad=4)
+            for spine in axis.spines.values():
+                spine.set_visible(False)
+            axis.set_xticks(np.arange(-0.5, len(values.columns), 1), minor=True)
+            axis.set_yticks(np.arange(-0.5, len(models), 1), minor=True)
+            axis.grid(which="minor", color="white", linewidth=1.5)
+            axis.tick_params(which="minor", bottom=False, left=False)
     colorbar_axis = figure.add_subplot(grid[:, -1])
     colorbar = figure.colorbar(ScalarMappable(norm=cell_norm, cmap=cell_cmap), cax=colorbar_axis)
-    colorbar.set_label("Relative performance\n(blue = better)", fontsize=8)
+    colorbar.set_ticks([-0.75, 0.0, 0.75])
+    colorbar.set_ticklabels(["75% lower", "reference", "75% higher"])
+    colorbar.outline.set_visible(False)
+    colorbar.set_label(
+        f"Performance relative to {DEFAULT_MODEL_LABELS.get(reference_model, reference_model)}\n"
+        "(blue = better)",
+        rotation=270,
+        labelpad=29,
+        fontsize=9,
+        color="#374151",
+    )
+    colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
     figure.suptitle(
         "Raw T2M heat forecast scorecard — ERA5 1991–2020 q95 threshold; no bias correction",
-        fontsize=12,
-        y=1.01,
+        fontsize=16,
+        fontweight="semibold",
+        y=0.98,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path, dpi=180, bbox_inches="tight")
+    figure.subplots_adjust(top=0.82, bottom=0.13, left=0.055, right=0.96)
+    figure.savefig(path, dpi=220, facecolor="white")
     plt.close(figure)
 
 

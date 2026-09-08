@@ -28,7 +28,9 @@ from heatextremes.verification.regions import load_regions, select_regions
 
 
 DEFAULT_MODELS = ["aifs_ens_v2", "ifs_ens", "aifs_v2", "aurora_e2s", "graphcast_e2s"]
-DEFAULT_REGIONS = ["mali", "nigeria", "global"]
+# The report-facing default is the publishable Nigeria panel.  Other regional
+# or global scorecards remain available through --regions when they are needed.
+DEFAULT_REGIONS = ["nigeria"]
 DEFAULT_FORECAST_DAYS = [0, 3, 6, 9, 12]
 DEFAULT_YEARS = [2022, 2023, 2024, 2025]
 DEFAULT_MONTHS = [6, 7, 8, 9]

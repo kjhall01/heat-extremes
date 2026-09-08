@@ -152,7 +152,7 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
   --models "aifs_ens_v2 ifs_ens aifs_v2 aurora_e2s graphcast_e2s" \
   --years "2022 2023 2024 2025" --months "6 7 8 9" \
   --max-forecast-day 12 --max-concurrent 1 \
-  --regions "global mali nigeria" \
+  --regions "nigeria" \
   --report-scorecard
 ```
 

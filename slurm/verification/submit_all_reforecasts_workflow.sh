@@ -29,7 +29,7 @@ Options:
   --report-scorecard-models "NAME ..."
                               default: AIFS ENS v2, IFS ENS, AIFS v2, Aurora, GraphCast
   --report-scorecard-regions "NAME ..."
-                              default: "mali nigeria global"
+                              default: "nigeria"
   --report-scorecard-forecast-days "N ..."
                               default: "0 3 6 9 12"
   --overwrite                   replace only configured partial result partitions
@@ -54,7 +54,7 @@ REPORT_SCORECARD=0
 REPORT_SCORECARD_OUTPUT=""
 REPORT_SCORECARD_MODELS_TEXT="aifs_ens_v2 ifs_ens aifs_v2 aurora_e2s graphcast_e2s"
 REPORT_SCORECARD_MODELS_EXPLICIT=0
-REPORT_SCORECARD_REGIONS_TEXT="mali nigeria global"
+REPORT_SCORECARD_REGIONS_TEXT="nigeria"
 REPORT_SCORECARD_FORECAST_DAYS_TEXT="0 3 6 9 12"
 OVERWRITE_VALUE=0
 INVENTORY_ONLY=0
