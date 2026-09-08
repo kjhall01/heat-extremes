@@ -14,6 +14,7 @@ from heatextremes.verification.global_z500 import (
 )
 from heatextremes.verification.regions import Region
 from heatextremes.verification.report_scorecard import (
+    _relative_performance,
     hot_day_frequency_change,
     plot_scorecard,
     score_lead,
@@ -199,9 +200,27 @@ def test_report_plot_combines_frequency_map_and_absolute_metric_cells(tmp_path: 
         path,
         frequency_change_maps={"nigeria": frequency_change},
         regions={"nigeria": Region("nigeria", 4.0, 14.0, 2.0, 15.0)},
+        reference_model="aifs_ens_v2",
     )
 
     assert path.is_file()
+
+
+def test_scorecard_colours_orient_all_metrics_as_performance_against_ifs() -> None:
+    lower_values = pd.DataFrame(
+        {0: [2.0, 1.0], 3: [4.0, 2.0]}, index=["ifs_ens", "graphcast_e2s"]
+    )
+    higher_values = pd.DataFrame(
+        {0: [0.4, 0.6], 3: [0.2, 0.3]}, index=["ifs_ens", "graphcast_e2s"]
+    )
+
+    lower_is_better = _relative_performance(lower_values, "ifs_ens", higher_is_better=False)
+    higher_is_better = _relative_performance(higher_values, "ifs_ens", higher_is_better=True)
+
+    # For RMSE/FAR/Brier IFS/model - 1 makes GraphCast's lower raw values
+    # positive (blue/better); for POD model/IFS - 1 has the same orientation.
+    assert lower_is_better.loc["graphcast_e2s"].tolist() == pytest.approx([1.0, 1.0])
+    assert higher_is_better.loc["graphcast_e2s"].tolist() == pytest.approx([0.5, 0.5])
 
 
 def test_frequency_change_map_uses_observed_hot_day_rates() -> None:

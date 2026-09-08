@@ -426,19 +426,24 @@ def plot_scorecard(
     *,
     frequency_change_maps: Mapping[str, xr.DataArray] | None = None,
     regions: Mapping[str, Region],
-    reference_model: str = "aifs_ens_v2",
+    reference_model: str = "ifs_ens",
 ) -> None:
     """Write the map-plus-scorecard composition used for the report figure.
 
-    Cell colour encodes relative performance versus the AIFS ENS v2 mean;
-    absolute values are printed in every cell.  Red is worse and blue is
-    better.  The layout intentionally follows ``model_scorecards.ipynb`` so
-    the report PNG is usable as a stand-alone figure rather than a compact
-    diagnostic.
+    Cell colour encodes relative performance versus ECMWF IFS ENS; absolute
+    values are printed in every cell. Red is worse, white is equal, and blue
+    is better. For RMSE, FAR, and Brier score the plotted value is
+    ``IFS / model - 1``; for POD it is ``model / IFS - 1``. This orients all
+    four metrics so positive values mean better performance. The layout
+    intentionally follows ``model_scorecards.ipynb`` so the report PNG is
+    usable as a stand-alone figure rather than a compact diagnostic.
     """
     region_names = list(scorecard["region"].drop_duplicates())
     if reference_model not in set(scorecard["model"]):
-        reference_model = str(scorecard["model"].iloc[0])
+        raise ValueError(
+            f"Cannot plot a comparison scorecard without baseline model {reference_model!r}. "
+            "Include it in --models or pass an explicit reference_model."
+        )
     frequency_change_maps = frequency_change_maps or {}
     # Each shade represents the percent departure from the reference model,
     # after orienting every metric so positive is better.  Keep the notebook's
@@ -458,7 +463,7 @@ def plot_scorecard(
         len(region_names),
         len(_PLOT_METRICS) + 2,
         width_ratios=[1.50, *([1.52] * len(_PLOT_METRICS)), 0.12],
-        wspace=0.35,
+        wspace=0.45,
         hspace=0.45,
     )
     for row, region_name in enumerate(region_names):
@@ -610,10 +615,10 @@ def plot_scorecard(
                 axis.set_yticks(
                     range(len(models)),
                     labels=model_labels,
-                    fontsize=9,
-                    rotation=90,
+                    fontsize=8.5,
+                    rotation=0,
                     va="center",
-                    ha="center",
+                    ha="right",
                 )
                 for tick, model in zip(axis.get_yticklabels(), models):
                     tick.set_fontweight("bold" if model == reference_model else "normal")
@@ -622,7 +627,7 @@ def plot_scorecard(
             if row == len(region_names) - 1:
                 axis.set_xlabel("Forecast day", fontsize=10, labelpad=7)
             axis.tick_params(axis="x", length=0, pad=3)
-            axis.tick_params(axis="y", length=0, pad=4)
+            axis.tick_params(axis="y", length=0, pad=5)
             for spine in axis.spines.values():
                 spine.set_visible(False)
             axis.set_xticks(np.arange(-0.5, len(values.columns), 1), minor=True)
@@ -632,11 +637,11 @@ def plot_scorecard(
     colorbar_axis = figure.add_subplot(grid[:, -1])
     colorbar = figure.colorbar(ScalarMappable(norm=cell_norm, cmap=cell_cmap), cax=colorbar_axis)
     colorbar.set_ticks([-0.75, 0.0, 0.75])
-    colorbar.set_ticklabels(["75% lower", "reference", "75% higher"])
+    colorbar.set_ticklabels(["75% worse", "equal", "75% better"])
     colorbar.outline.set_visible(False)
     colorbar.set_label(
         f"Performance relative to {DEFAULT_MODEL_LABELS.get(reference_model, reference_model)}\n"
-        "(blue = better)",
+        "(red = worse; blue = better)",
         rotation=270,
         labelpad=29,
         fontsize=9,
@@ -753,6 +758,12 @@ def build_report_scorecard(
                 f"observed_hot_day_frequency_change_{region_name}.nc"
                 for region_name in frequency_change_maps
             ],
+            "plot_reference_model": "ifs_ens",
+            "plot_relative_performance_definition": (
+                "Heatmap colour is signed relative performance versus ECMWF IFS ENS: "
+                "for RMSE, FAR, and Brier score it is IFS / model - 1; for POD it is "
+                "model / IFS - 1. Thus red is worse, white is equal, and blue is better."
+            ),
             "comparison_note": (
                 "All model comparisons use the exact intersection of selected JJAS initialization dates. "
                 "No significance testing is implied."
