@@ -149,7 +149,7 @@ missing cache slice is an error, never a quietly grey or NaN report cell.
 
 ```bash
 bash slurm/verification/submit_all_reforecasts_workflow.sh \
-  --models "aifs_ens_v2 ifs_ens aifs_v2 aurora_e2s graphcast_e2s" \
+  --models "aifs_ens_v2 aifs_v2 aurora_e2s graphcast_e2s ifs_ens" \
   --years "2022 2023 2024 2025" --months "6 7 8 9" \
   --max-forecast-day 12 --max-concurrent 1 \
   --regions "nigeria" \
@@ -165,18 +165,18 @@ The final job writes these files beneath
 - `heat_report_scorecard_metadata.json`, including the scientific definitions
   and source paths.
 
-The Nigeria PNG preserves the report's map-plus-scorecard composition, with
-an ERA5 observed hot-day-incidence-change map beside absolute-value,
-colour-coded metric cells. The map input is additionally saved as
-`observed_hot_day_frequency_change_nigeria.nc`.
+The Nigeria PNG is a table-only scorecard: absolute metric values are printed
+in colour-coded cells, with IFS ensemble mean as the reference. The colour
+legend is a signed relative score (not a percentage): for RMSE, FAR, and
+Brier it is `IFS / model - 1`; for POD it is `model / IFS - 1`. Red means
+worse, white equal, and blue better.
 
 ### Global T2M report figure
 
 Use the same scorecard job with `global` explicitly selected. It writes a
-full-width, map-free global metric figure to
-`<result-root>/_report_scorecard_global/`, leaving the Nigeria output intact.
-The global figure shares the IFS baseline, cell styling, and legend, but does
-not incur an unnecessary full-world observed-frequency-map reduction. Its
+full-width global metric figure to `<result-root>/_report_scorecard_global/`,
+leaving the Nigeria output intact. The global figure shares the IFS baseline,
+cell styling, and legend. Its
 first column is all-day global T2M RMSE (`rmse_all`), rather than the
 hot-day-conditional RMSE used in the Nigeria heat figure.
 
@@ -192,14 +192,16 @@ the corresponding log paths.
 bash slurm/verification/submit_both_jobs.sh
 ```
 
-The scorecard is deliberately **raw**, with no forecast bias correction.  Its
-temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day.  Its POD
+The scorecard is deliberately **raw**, with no forecast bias correction. Its
+temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day. Its POD
 and FAR are *deterministic*: the model's deterministic/ensemble-mean T2M is
-tested against ERA5's 1991--2020 local calendar-day q95.  The native hot-day
-exceedance probability is evaluated separately by Brier score.  Thus a claim
-that a model is "better probabilistically" must refer to the Brier column,
-not to the deterministic POD/FAR columns.  `mali` and `nigeria` are explicitly
-labelled rectangular reporting boxes, not country-boundary masks.
+tested against ERA5's 1991--2020 local calendar-day q95. Brier is evaluated
+without a decision cutoff. For AIFSv2 ensemble mean and IFS ensemble mean its
+probability is the fraction of members exceeding q95; for AIFSv2
+deterministic, Aurora, and GraphCast it is a 0/1 q95-exceedance forecast, so
+their Brier score is weighted binary event error rather than an ensemble
+probability-calibration score. `mali` and `nigeria` are explicitly labelled
+rectangular reporting boxes, not country-boundary masks.
 
 ### Global Z500 + T2M scorecard
 

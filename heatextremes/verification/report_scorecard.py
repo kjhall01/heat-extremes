@@ -2,10 +2,10 @@
 
 This module is deliberately separate from the normal aggregate figures.  It
 reproduces the deterministic temperature-versus-ERA5-q95 definitions used in
-``model_scorecards.ipynb`` while also reporting the native event-probability
-Brier score.  The distinction matters: POD/FAR here are for a deterministic
-forecast made from each model's mean temperature; Brier score is for its
-probabilistic hot-day forecast.
+``model_scorecards.ipynb`` while also reporting a hot-day Brier score.  The
+distinction matters: POD/FAR here are for a deterministic forecast made from
+each model's mean temperature.  Brier uses member-fraction probabilities for
+ensembles and 0/1 exceedance forecasts for deterministic models.
 """
 
 from __future__ import annotations
@@ -22,13 +22,6 @@ from dask.diagnostics import ProgressBar
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import TwoSlopeNorm
 
-try:  # Cartopy is included in the project environment but optional for tests/lightweight installs.
-    import cartopy.crs as ccrs
-    import cartopy.feature as cfeature
-except ModuleNotFoundError:  # pragma: no cover - exercised only without the optional plotting dependency.
-    ccrs = None
-    cfeature = None
-
 from .alignment import map_to_forecast_grid
 from .case_cache_reader import (
     DEFAULT_AIFS_MONTHLY_ROOT,
@@ -38,7 +31,7 @@ from .case_cache_reader import (
     LEGACY_AIFS_MODEL_NAMES,
     open_model_intermediates,
 )
-from .io import now_utc, write_json_atomic, write_netcdf_atomic, write_table_atomic
+from .io import now_utc, write_json_atomic, write_table_atomic
 from .regions import Region, region_mask
 from .weighting import cosine_latitude_weights
 
@@ -49,12 +42,19 @@ DEFAULT_THRESHOLD_STORE = Path(
 )
 DEFAULT_THRESHOLD_VARIABLE = "t2m_daily_mean_calendar_day_percentile"
 DEFAULT_MODEL_LABELS = {
-    "aifs_ens_v2": "AIFS ENS v2 mean",
-    "ifs_ens": "ECMWF IFS ENS",
-    "aifs_v2": "AIFS v2",
+    "aifs_ens_v2": "AIFSv2 (ensemble mean)",
+    "aifs_v2": "AIFSv2 (deterministic)",
     "aurora_e2s": "Aurora",
     "graphcast_e2s": "GraphCast",
+    "ifs_ens": "IFS (ensemble mean)",
 }
+DEFAULT_MODEL_ORDER = (
+    "aifs_ens_v2",
+    "aifs_v2",
+    "aurora_e2s",
+    "graphcast_e2s",
+    "ifs_ens",
+)
 
 # A scorecard does not average monthly ratios: every value below is one
 # cosine-latitude weighted reduction over its common initialization cases.
@@ -122,8 +122,10 @@ def score_lead(
 
     ``pod_deterministic`` and ``far_deterministic`` classify the model's
     ensemble-mean/deterministic temperature against the ERA5 1991--2020 q95
-    threshold. ``brier_score_probabilistic`` uses the model's native
-    hot-day exceedance probability, with no decision cutoff.
+    threshold. ``brier_score_probabilistic`` is a proper Brier score with no
+    decision cutoff.  Its probability is the member exceedance fraction for
+    ensemble sources, or a valid 0/1 q95-exceedance forecast for deterministic
+    sources.
     """
     lead = dataset.sel(forecast_day=forecast_day)
     forecast = lead["forecast_temperature"]
@@ -339,88 +341,56 @@ def scorecard_direction_table(
 
 
 _PLOT_METRICS = (
-    ("rmse_hot", "Hot-day\nRMSE (K)", False),
-    ("pod_deterministic", "Deterministic\nPOD", True),
-    ("far_deterministic", "Deterministic\nFAR", False),
-    ("brier_score_probabilistic", "Probabilistic\nBrier", False),
+    ("rmse_hot", "Hot-day RMSE (K)", False),
+    ("pod_deterministic", "POD", True),
+    ("far_deterministic", "FAR", False),
+    ("brier_score_probabilistic", "Brier", False),
 )
 
 _GLOBAL_PLOT_METRICS = (
     # The global rung requested for the report is standard all-day T2M RMSE,
     # not error conditional on a local hot day as in the regional heat panel.
-    ("rmse_all", "Global T2M\nRMSE (K)", False),
-    ("pod_deterministic", "Deterministic\nPOD", True),
-    ("far_deterministic", "Deterministic\nFAR", False),
-    ("brier_score_probabilistic", "Probabilistic\nBrier", False),
+    ("rmse_all", "T2M RMSE (K)", False),
+    ("pod_deterministic", "POD", True),
+    ("far_deterministic", "FAR", False),
+    ("brier_score_probabilistic", "Brier", False),
 )
-
-
-def hot_day_frequency_change(
-    daily_temperature: xr.DataArray,
-    threshold: xr.DataArray,
-    region: Region,
-    *,
-    validation_years: Sequence[int],
-    climatology_years: Sequence[int],
-    months: Sequence[int],
-) -> xr.DataArray:
-    """Observed JJAS q95 incidence change for the map portion of the scorecard."""
-    selected_years = sorted(set(validation_years).union(climatology_years))
-    selected = daily_temperature.where(
-        daily_temperature.time.dt.year.isin(selected_years)
-        & daily_temperature.time.dt.month.isin(months),
-        drop=True,
-    )
-    selected = selected.where(region_mask(selected, region), drop=True)
-    mapped_threshold = map_to_forecast_grid(threshold, selected, method="linear")
-    q95 = threshold_for_calendar_days(mapped_threshold, selected.time.dt.dayofyear)
-    hot = selected > q95
-    validation = hot.where(hot.time.dt.year.isin(validation_years)).mean("time", skipna=True)
-    climatology = hot.where(hot.time.dt.year.isin(climatology_years)).mean("time", skipna=True)
-    return (100 * (validation / climatology - 1)).rename("hot_day_frequency_change")
-
-
-def compute_frequency_change_maps(
-    *,
-    daily_temperature_store: str | Path,
-    threshold: xr.DataArray,
-    regions: Mapping[str, Region],
-    validation_years: Sequence[int],
-    climatology_years: Sequence[int],
-    months: Sequence[int],
-) -> dict[str, xr.DataArray]:
-    """Compute bounded regional map inputs once; the global row is metrics-only."""
-    source = xr.open_zarr(daily_temperature_store, consolidated=True, chunks="auto")
-    try:
-        if "t2m_daily_mean" not in source:
-            raise KeyError("ERA5 daily-temperature store is missing 't2m_daily_mean'")
-        daily_temperature = source["t2m_daily_mean"]
-        maps: dict[str, xr.DataArray] = {}
-        for name, region in regions.items():
-            # A map for the global scorecard is both less useful to a report
-            # designer and disproportionately expensive. Its global metrics
-            # still appear in the scorecard row below the regional panels.
-            if region.latitude_min is None and region.longitude_min is None:
-                continue
-            print(f"Computing observed hot-day frequency-change map: {name}", flush=True)
-            with ProgressBar():
-                maps[name] = hot_day_frequency_change(
-                    daily_temperature,
-                    threshold,
-                    region,
-                    validation_years=validation_years,
-                    climatology_years=climatology_years,
-                    months=months,
-                ).compute()
-        return maps
-    finally:
-        source.close()
 
 
 def _relative_performance(values: pd.DataFrame, reference_model: str, higher_is_better: bool) -> pd.DataFrame:
     reference = values.loc[reference_model]
     relative = values.divide(reference, axis="columns") if higher_is_better else values.rdiv(reference, axis="columns")
     return relative.replace([np.inf, -np.inf], np.nan) - 1.0
+
+
+def _brier_probability_definition(models: Sequence[str]) -> str:
+    """Describe exactly how the scorecard's canonical probability is formed."""
+    ensemble_models = [
+        DEFAULT_MODEL_LABELS.get(model, model)
+        for model in models
+        if model in {"aifs_ens_v2", "ifs_ens"}
+    ]
+    deterministic_models = [
+        DEFAULT_MODEL_LABELS.get(model, model)
+        for model in models
+        if model in {"aifs_v2", "aurora_e2s", "graphcast_e2s"}
+    ]
+    clauses = [
+        "Brier score is the cosine-latitude-weighted mean of (p - o)^2 for the ERA5 q95 hot-day event, without a decision cutoff."
+    ]
+    if ensemble_models:
+        clauses.append(
+            "For "
+            + ", ".join(ensemble_models)
+            + ", p is the fraction of members whose local-solar daily T2M exceeds the ERA5 1991-2020 local calendar-day q95."
+        )
+    if deterministic_models:
+        clauses.append(
+            "For "
+            + ", ".join(deterministic_models)
+            + ", p is the model's 0/1 q95-exceedance forecast, so Brier is weighted binary event error rather than ensemble-probability calibration."
+        )
+    return " ".join(clauses)
 
 
 def _format_metric(value: float, metric: str) -> str:
@@ -433,19 +403,17 @@ def plot_scorecard(
     scorecard: pd.DataFrame,
     path: Path,
     *,
-    frequency_change_maps: Mapping[str, xr.DataArray] | None = None,
-    regions: Mapping[str, Region],
     reference_model: str = "ifs_ens",
 ) -> None:
-    """Write the regional map-plus-scorecard or global table-only figure.
+    """Write a polished, table-only regional or global scorecard figure.
 
-    Cell colour encodes relative performance versus ECMWF IFS ENS; absolute
-    values are printed in every cell. Red is worse, white is equal, and blue
-    is better. For RMSE, FAR, and Brier score the plotted value is
-    ``IFS / model - 1``; for POD it is ``model / IFS - 1``. This orients all
-    four metrics so positive values mean better performance. The layout
-    intentionally follows ``model_scorecards.ipynb`` so the report PNG is
-    usable as a stand-alone figure rather than a compact diagnostic.
+    Cell colour is a signed relative score versus IFS ensemble mean; absolute
+    metric values are printed in every cell. Red is worse, white is equal, and
+    blue is better.  For RMSE, FAR, and Brier score the colour value is
+    ``IFS / model - 1``; for POD it is ``model / IFS - 1``.  This orients all
+    four metrics so positive values mean better performance.  The legend uses
+    those unitless values directly rather than labelling the transformed score
+    as a percentage.
     """
     region_names = list(scorecard["region"].drop_duplicates())
     if reference_model not in set(scorecard["model"]):
@@ -453,144 +421,38 @@ def plot_scorecard(
             f"Cannot plot a comparison scorecard without baseline model {reference_model!r}. "
             "Include it in --models or pass an explicit reference_model."
         )
-    frequency_change_maps = frequency_change_maps or {}
-    # The global product deliberately has no map: a world-scale incidence map
-    # is expensive and adds no useful context to a global metric scorecard.
-    # Reclaim that space for the metric cells rather than leaving a placeholder.
-    show_map_column = any(region_name in frequency_change_maps for region_name in region_names)
-    metric_start_column = 1 if show_map_column else 0
     plot_metrics = _GLOBAL_PLOT_METRICS if region_names == ["global"] else _PLOT_METRICS
-    # Each shade represents the percent departure from the reference model,
-    # after orienting every metric so positive is better.  Keep the notebook's
-    # generous +/-100% scale: a compact +/-50% scale made ordinary differences
-    # look saturated and made the text hard to read in the report version.
+    # Each shade represents a signed, unitless comparison to the reference,
+    # oriented so positive means better. Keep the generous +/-1 scale: a
+    # compact +/-0.5 scale made ordinary differences look saturated and the
+    # cell labels hard to read in the report version.
     cell_norm = TwoSlopeNorm(vmin=-1.0, vcenter=0.0, vmax=1.0)
     cell_cmap = plt.colormaps["RdBu"].copy()
     cell_cmap.set_bad("#e5e7eb")
-    map_norm = TwoSlopeNorm(vmin=-100.0, vcenter=0.0, vmax=500.0)
-    map_cmap = plt.colormaps["RdBu_r"].copy()
-    map_cmap.set_bad("#e5e7eb")
     figure = plt.figure(
         figsize=(
-            (8.5 if show_map_column else 4.9) + 3.35 * len(plot_metrics),
-            1.35 + 3.15 * len(region_names),
+            5.4 + 3.25 * len(plot_metrics),
+            1.90 + 3.15 * len(region_names),
         ),
         facecolor="white",
     )
     grid = figure.add_gridspec(
-        len(region_names),
-        len(plot_metrics) + 1 + int(show_map_column),
-        width_ratios=[
-            *([1.50] if show_map_column else []),
-            *([1.52] * len(plot_metrics)),
-            0.12,
-        ],
+        len(region_names) + 1,
+        len(plot_metrics),
+        height_ratios=[*([1.0] * len(region_names)), 0.045],
         wspace=0.45,
-        hspace=0.45,
+        hspace=0.62,
     )
     for row, region_name in enumerate(region_names):
-        if show_map_column:
-            region = regions[region_name]
-            map_axis = (
-                figure.add_subplot(grid[row, 0], projection=ccrs.PlateCarree())
-                if ccrs is not None
-                else figure.add_subplot(grid[row, 0])
-            )
-            frequency_map = frequency_change_maps.get(region_name)
-            if frequency_map is None:
-                map_axis.text(
-                    0.5,
-                    0.5,
-                    "Map\ndisabled",
-                    transform=map_axis.transAxes,
-                    ha="center",
-                    va="center",
-                    fontsize=12,
-                )
-            else:
-                map_kwargs = {"transform": ccrs.PlateCarree()} if ccrs is not None else {}
-                image = map_axis.pcolormesh(
-                    frequency_map.longitude,
-                    frequency_map.latitude,
-                    frequency_map,
-                    cmap=map_cmap,
-                    norm=map_norm,
-                    shading="auto",
-                    rasterized=True,
-                    **map_kwargs,
-                )
-                if ccrs is not None:
-                    # Coastlines give geographic orientation; country boundaries
-                    # make clear that Nigeria is a reporting box, rather than a
-                    # political-boundary average.
-                    map_axis.coastlines(color="#4a4a4a", linewidth=0.65)
-                    if cfeature is not None:
-                        map_axis.add_feature(
-                            cfeature.BORDERS.with_scale("50m"),
-                            edgecolor="#4a4a4a",
-                            linewidth=0.55,
-                            zorder=3,
-                        )
-                    map_axis.spines["geo"].set_visible(True)
-                    map_axis.spines["geo"].set_color("#1f2937")
-                    map_axis.spines["geo"].set_linewidth(0.8)
-                if region.latitude_min is not None and region.longitude_min is not None:
-                    if ccrs is not None:
-                        map_axis.set_extent(
-                            [
-                                region.longitude_min,
-                                region.longitude_max,
-                                region.latitude_min,
-                                region.latitude_max,
-                            ],
-                            crs=ccrs.PlateCarree(),
-                        )
-                    else:
-                        map_axis.set(
-                            xlim=(region.longitude_min, region.longitude_max),
-                            ylim=(region.latitude_min, region.latitude_max),
-                        )
-                map_axis.set_facecolor("#f5f7fa")
-                map_axis.set_title(
-                    f"{region_name.replace('_', ' ').title()}\nobserved hot-day change",
-                    fontsize=12,
-                    fontweight="semibold",
-                    pad=16,
-                )
-                if ccrs is None:
-                    map_axis.set(xlabel="Longitude", ylabel="Latitude")
-                elif region.latitude_min is not None and region.longitude_min is not None:
-                    gridlines = map_axis.gridlines(
-                        draw_labels=True,
-                        linewidth=0.35,
-                        color="#6b7280",
-                        alpha=0.5,
-                        linestyle=":",
-                        x_inline=False,
-                        y_inline=False,
-                    )
-                    gridlines.top_labels = False
-                    gridlines.right_labels = False
-                    gridlines.xlabel_style = {"size": 8, "color": "#374151"}
-                    gridlines.ylabel_style = {"size": 8, "color": "#374151"}
-                map_colorbar = figure.colorbar(
-                    image,
-                    ax=map_axis,
-                    orientation="horizontal",
-                    pad=0.12,
-                    ticks=[-80, -40, 0, 200, 400],
-                )
-                map_colorbar.outline.set_visible(False)
-                map_colorbar.set_label("Extreme-incidence rate change (%)", fontsize=8.5, color="#374151")
-                map_colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
         regional = scorecard[scorecard["region"].eq(region_name)]
-        models = list(regional["model"].drop_duplicates())
+        available_models = list(regional["model"].drop_duplicates())
+        models = [model for model in DEFAULT_MODEL_ORDER if model in available_models]
+        models.extend(model for model in available_models if model not in models)
         model_labels = (
             regional.drop_duplicates("model").set_index("model").loc[models, "model_label"].tolist()
         )
         for metric_index, (metric, label, higher_is_better) in enumerate(plot_metrics):
-            column = metric_start_column + metric_index
-            axis = figure.add_subplot(grid[row, column])
+            axis = figure.add_subplot(grid[row, metric_index])
             values = regional.pivot(index="model", columns="forecast_day", values=metric).reindex(index=models)
             relative = _relative_performance(values, reference_model, higher_is_better)
             axis.imshow(
@@ -619,19 +481,19 @@ def plot_scorecard(
                             and (relative_value < -0.35 or relative_value > 0.35)
                             else "#263238"
                         ),
-                        fontsize=10,
+                        fontsize=10.5,
                         fontweight="bold" if model == reference_model else "normal",
                     )
             axis.set_xticks(
                 range(len(values.columns)), labels=[str(value) for value in values.columns], fontsize=10
             )
             if row == 0:
-                axis.set_title(label, fontsize=12, fontweight="semibold", pad=16)
+                axis.set_title(label, fontsize=12, fontweight="semibold", pad=13)
             if metric_index == 0:
                 axis.set_yticks(
                     range(len(models)),
                     labels=model_labels,
-                    fontsize=8.5,
+                    fontsize=9,
                     rotation=0,
                     va="center",
                     ha="right",
@@ -650,27 +512,26 @@ def plot_scorecard(
             axis.set_yticks(np.arange(-0.5, len(models), 1), minor=True)
             axis.grid(which="minor", color="white", linewidth=1.5)
             axis.tick_params(which="minor", bottom=False, left=False)
-    colorbar_axis = figure.add_subplot(grid[:, -1])
-    colorbar = figure.colorbar(ScalarMappable(norm=cell_norm, cmap=cell_cmap), cax=colorbar_axis)
+    colorbar_axis = figure.add_subplot(grid[-1, :])
+    colorbar = figure.colorbar(
+        ScalarMappable(norm=cell_norm, cmap=cell_cmap), cax=colorbar_axis, orientation="horizontal"
+    )
     colorbar.set_ticks([-0.75, 0.0, 0.75])
-    colorbar.set_ticklabels(["75% worse", "equal", "75% better"])
+    colorbar.set_ticklabels(["−0.75", "0", "+0.75"])
     colorbar.outline.set_visible(False)
     colorbar.set_label(
-        f"Performance relative to {DEFAULT_MODEL_LABELS.get(reference_model, reference_model)}\n"
+        f"Signed relative score vs {DEFAULT_MODEL_LABELS.get(reference_model, reference_model)} "
         "(red = worse; blue = better)",
-        rotation=270,
-        labelpad=29,
+        labelpad=6,
         fontsize=9,
         color="#374151",
     )
     colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.subplots_adjust(
-        # Metric headings are two lines; leave room for both without adding a
-        # figure-level title above the panels.
-        top=0.86,
-        bottom=0.13,
-        left=0.055 if show_map_column else 0.13,
+        top=0.88,
+        bottom=0.11,
+        left=0.15,
         right=0.96,
     )
     figure.savefig(path, dpi=220, facecolor="white")
@@ -692,7 +553,6 @@ def build_report_scorecard(
     years: Sequence[int] = (2022, 2023, 2024, 2025),
     months: Sequence[int] = (6, 7, 8, 9),
     forecast_days: Sequence[int] = (0, 3, 6, 9, 12),
-    include_frequency_change_maps: bool = True,
 ) -> pd.DataFrame:
     """Build the CSV, direction check, PNG, and scientific provenance record."""
     output = Path(output_directory)
@@ -715,18 +575,6 @@ def build_report_scorecard(
         scorecard = compute_scorecard(
             datasets, threshold=threshold, regions=regions, forecast_days=forecast_days
         )
-        frequency_change_maps = (
-            compute_frequency_change_maps(
-                daily_temperature_store=era5_daily_temperature_store,
-                threshold=threshold,
-                regions=regions,
-                validation_years=years,
-                climatology_years=tuple(range(1991, 2021)),
-                months=months,
-            )
-            if include_frequency_change_maps
-            else {}
-        )
     finally:
         threshold_source.close()
         for dataset in datasets.values():
@@ -735,16 +583,9 @@ def build_report_scorecard(
     write_table_atomic(scorecard, output / "heat_report_scorecard.csv")
     direction = scorecard_direction_table(scorecard)
     write_table_atomic(direction, output / "graphcast_vs_ifs_direction_check.csv")
-    for region_name, frequency_change_map in frequency_change_maps.items():
-        write_netcdf_atomic(
-            frequency_change_map.to_dataset(),
-            output / f"observed_hot_day_frequency_change_{region_name}.nc",
-        )
     plot_scorecard(
         scorecard,
         output / "heat_report_scorecard.png",
-        frequency_change_maps=frequency_change_maps,
-        regions=regions,
     )
     write_json_atomic(
         {
@@ -761,24 +602,15 @@ def build_report_scorecard(
             "temperature_units": "K",
             "bias_correction": "none",
             "deterministic_definition": (
-                "Forecast ensemble-mean temperature > ERA5 1991-2020 local calendar-day q95; "
-                "POD and FAR use this binary forecast."
+                "Raw forecast ensemble-mean/deterministic temperature > ERA5 1991-2020 local "
+                "calendar-day q95; POD and FAR use this binary forecast."
             ),
-            "probabilistic_definition": (
-                "Native model hot-day exceedance probability; Brier score is reported without a decision cutoff."
-            ),
-            "map_definition": (
-                "Map panels show 100 * (2022-2025 JJAS observed local-calendar-day q95 hot-day frequency / "
-                "1991-2020 JJAS frequency - 1), using ERA5 only. The global scorecard is map-free."
-            ),
+            "probabilistic_definition": _brier_probability_definition(models),
+            "figure_layout": "Table-only scorecard; no map panel.",
             "global_plot_metric_note": (
                 "A global-only figure shows all-day global T2M RMSE (rmse_all), whereas regional heat "
                 "figures show observed-hot-day-conditional T2M RMSE (rmse_hot)."
             ),
-            "map_files": [
-                f"observed_hot_day_frequency_change_{region_name}.nc"
-                for region_name in frequency_change_maps
-            ],
             "plot_reference_model": "ifs_ens",
             "plot_relative_performance_definition": (
                 "Heatmap colour is signed relative performance versus ECMWF IFS ENS: "

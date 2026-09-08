@@ -20,8 +20,8 @@ if [[ ! -x "${PYTHON}" || ! -f "${REPOSITORY_ROOT}/scripts/verification/build_re
     exit 2
 fi
 
-MODELS_TEXT="${REPORT_SCORECARD_MODELS:-aifs_ens_v2 ifs_ens aifs_v2 aurora_e2s graphcast_e2s}"
-# Nigeria is the publishable default and avoids computing unused regional maps.
+MODELS_TEXT="${REPORT_SCORECARD_MODELS:-aifs_ens_v2 aifs_v2 aurora_e2s graphcast_e2s ifs_ens}"
+# Nigeria is the publishable default and is rendered as a table-only scorecard.
 # Supply REPORT_SCORECARD_REGIONS explicitly to include Mali or global metrics.
 REGIONS_TEXT="${REPORT_SCORECARD_REGIONS:-nigeria}"
 FORECAST_DAYS_TEXT="${REPORT_SCORECARD_FORECAST_DAYS:-0 3 6 9 12}"

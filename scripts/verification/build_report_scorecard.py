@@ -4,7 +4,8 @@
 The script does not open raw model forecast stores except for the historical
 AIFS ENS v2 compact monthly product, which has not yet been migrated to the
 canonical cache.  It writes raw (not bias-corrected) deterministic q95
-POD/FAR and native-probability Brier diagnostics side by side.
+POD/FAR and Brier diagnostics side by side. Brier uses ensemble-member
+fractions where available and 0/1 deterministic q95 forecasts otherwise.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from heatextremes.verification.report_scorecard import (
 from heatextremes.verification.regions import load_regions, select_regions
 
 
-DEFAULT_MODELS = ["aifs_ens_v2", "ifs_ens", "aifs_v2", "aurora_e2s", "graphcast_e2s"]
+DEFAULT_MODELS = ["aifs_ens_v2", "aifs_v2", "aurora_e2s", "graphcast_e2s", "ifs_ens"]
 # The report-facing default is the publishable Nigeria panel.  Other regional
 # or global scorecards remain available through --regions when they are needed.
 DEFAULT_REGIONS = ["nigeria"]
@@ -52,12 +53,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold-store", type=Path, default=DEFAULT_THRESHOLD_STORE)
     parser.add_argument("--threshold-variable", default=DEFAULT_THRESHOLD_VARIABLE)
     parser.add_argument("--threshold-percentile", type=float, default=95.0)
-    parser.add_argument(
-        "--no-frequency-change-maps",
-        action="store_false",
-        dest="include_frequency_change_maps",
-        help="Skip the observed hot-day-frequency map column when regenerating tables only.",
-    )
     return parser.parse_args()
 
 
@@ -81,7 +76,6 @@ def main() -> None:
         years=args.years,
         months=args.months,
         forecast_days=args.forecast_days,
-        include_frequency_change_maps=args.include_frequency_change_maps,
     )
     print(f"Wrote {len(scorecard)} scorecard rows to {args.output_directory}")
 
