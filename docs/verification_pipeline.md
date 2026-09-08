@@ -184,6 +184,14 @@ hot-day-conditional RMSE used in the Nigeria heat figure.
 sbatch --export=ALL,REPOSITORY_ROOT="$PWD",HEAT_VERIFICATION_RESULTS_ROOT="$RESULT_ROOT",REPORT_SCORECARD_REGIONS=global,REPORT_SCORECARD_FORECAST_DAYS="0 3 6 9" slurm/verification/submit_report_scorecard.sbatch
 ```
 
+To submit both report figures together, use the cluster helper. It submits
+separate Nigeria and global jobs and prints their IDs, output locations, and
+the corresponding log paths.
+
+```bash
+bash slurm/verification/submit_both_jobs.sh
+```
+
 The scorecard is deliberately **raw**, with no forecast bias correction.  Its
 temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day.  Its POD
 and FAR are *deterministic*: the model's deterministic/ensemble-mean T2M is
