@@ -223,6 +223,34 @@ def test_scorecard_colours_orient_all_metrics_as_performance_against_ifs() -> No
     assert higher_is_better.loc["graphcast_e2s"].tolist() == pytest.approx([0.5, 0.5])
 
 
+def test_global_report_plot_uses_full_width_table_without_a_map(tmp_path: Path) -> None:
+    rows = []
+    for model, label, adjustment in (("ifs_ens", "ECMWF IFS ENS", 0.0), ("graphcast_e2s", "GraphCast", 0.1)):
+        rows.append(
+            {
+                "region": "global",
+                "model": model,
+                "model_label": label,
+                "forecast_day": 0,
+                "rmse_all": 1.0 + adjustment,
+                "rmse_hot": 1.0 + adjustment,
+                "pod_deterministic": 0.5 - adjustment,
+                "far_deterministic": 0.2 + adjustment,
+                "brier_score_probabilistic": 0.1 + adjustment,
+            }
+        )
+
+    path = tmp_path / "global_scorecard.png"
+    plot_scorecard(
+        pd.DataFrame(rows),
+        path,
+        frequency_change_maps={},
+        regions={"global": Region("global")},
+    )
+
+    assert path.is_file()
+
+
 def test_frequency_change_map_uses_observed_hot_day_rates() -> None:
     temperature = xr.DataArray(
         np.array([2.0, 1.0, 2.0, 2.0])[:, None, None],

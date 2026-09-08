@@ -14,7 +14,6 @@ set -eo pipefail
 REPOSITORY_ROOT="${REPOSITORY_ROOT:-${SLURM_SUBMIT_DIR:?Set REPOSITORY_ROOT or submit from repository root}}"
 PYTHON="${HEAT_EXTREMES_PYTHON:-/home/kylehall/miniconda3/envs/heat-extremes/bin/python}"
 RESULT_ROOT="${HEAT_VERIFICATION_RESULTS_ROOT:?Set HEAT_VERIFICATION_RESULTS_ROOT to the case-cache result root}"
-OUTPUT_DIRECTORY="${REPORT_SCORECARD_OUTPUT_DIRECTORY:-${RESULT_ROOT}/_report_scorecard}"
 
 if [[ ! -x "${PYTHON}" || ! -f "${REPOSITORY_ROOT}/scripts/verification/build_report_scorecard.py" ]]; then
     echo "Python executable or report-scorecard script is missing" >&2
@@ -28,6 +27,15 @@ REGIONS_TEXT="${REPORT_SCORECARD_REGIONS:-nigeria}"
 FORECAST_DAYS_TEXT="${REPORT_SCORECARD_FORECAST_DAYS:-0 3 6 9 12}"
 YEARS_TEXT="${REPORT_SCORECARD_YEARS:-2022 2023 2024 2025}"
 MONTHS_TEXT="${REPORT_SCORECARD_MONTHS:-6 7 8 9}"
+
+if [[ -n "${REPORT_SCORECARD_OUTPUT_DIRECTORY:-}" ]]; then
+    OUTPUT_DIRECTORY="${REPORT_SCORECARD_OUTPUT_DIRECTORY}"
+elif [[ "${REGIONS_TEXT}" == "global" ]]; then
+    # Keep the global scorecard beside, rather than on top of, the Nigeria report figure.
+    OUTPUT_DIRECTORY="${RESULT_ROOT}/_report_scorecard_global"
+else
+    OUTPUT_DIRECTORY="${RESULT_ROOT}/_report_scorecard"
+fi
 
 read -r -a MODELS <<< "${MODELS_TEXT}"
 read -r -a REGIONS <<< "${REGIONS_TEXT}"

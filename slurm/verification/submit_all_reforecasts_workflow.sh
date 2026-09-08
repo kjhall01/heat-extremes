@@ -151,7 +151,11 @@ plot_job="$(sbatch --parsable "${EXPORT_ARGUMENT}" --dependency="afterany:${aggr
 
 report_scorecard_job=""
 if (( REPORT_SCORECARD )); then
-    REPORT_SCORECARD_OUTPUT="${REPORT_SCORECARD_OUTPUT:-${RESULT_ROOT}/_report_scorecard}"
+    if [[ -z "${REPORT_SCORECARD_OUTPUT}" && "${REPORT_SCORECARD_REGIONS_TEXT}" == "global" ]]; then
+        REPORT_SCORECARD_OUTPUT="${RESULT_ROOT}/_report_scorecard_global"
+    else
+        REPORT_SCORECARD_OUTPUT="${REPORT_SCORECARD_OUTPUT:-${RESULT_ROOT}/_report_scorecard}"
+    fi
     if (( ! REPORT_SCORECARD_MODELS_EXPLICIT )) && [[ -n "${MODELS_TEXT}" ]]; then
         REPORT_SCORECARD_MODELS_TEXT="${MODELS_TEXT}"
     fi

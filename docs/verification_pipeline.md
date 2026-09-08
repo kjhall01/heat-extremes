@@ -139,7 +139,7 @@ bash slurm/verification/submit_model_temperature_q95_workflow.sh \
 This workflow writes only a global q95 field plus temporary per-band daily
 staging stores beneath `model_climatology/`; it does not touch raw IFS data.
 
-## Report scorecard (Mali, Nigeria, global)
+## Report scorecard (Nigeria default; global available separately)
 
 The static notebook [`model_scorecards.ipynb`](../model_scorecards.ipynb) is
 useful for figure development.  For the report, submit the reproducible batch
@@ -165,11 +165,24 @@ The final job writes these files beneath
 - `heat_report_scorecard_metadata.json`, including the scientific definitions
   and source paths.
 
-The PNG preserves the report's map-plus-scorecard composition: Mali and
-Nigeria each have an ERA5 observed hot-day-incidence-change map alongside
-absolute-value, colour-coded metric cells.  The map inputs are additionally
-saved as `observed_hot_day_frequency_change_<region>.nc`; the global row is
-metrics-only so it does not trigger an unnecessary full-world map reduction.
+The Nigeria PNG preserves the report's map-plus-scorecard composition, with
+an ERA5 observed hot-day-incidence-change map beside absolute-value,
+colour-coded metric cells. The map input is additionally saved as
+`observed_hot_day_frequency_change_nigeria.nc`.
+
+### Global T2M report figure
+
+Use the same scorecard job with `global` explicitly selected. It writes a
+full-width, map-free global metric figure to
+`<result-root>/_report_scorecard_global/`, leaving the Nigeria output intact.
+The global figure shares the IFS baseline, cell styling, and legend, but does
+not incur an unnecessary full-world observed-frequency-map reduction. Its
+first column is all-day global T2M RMSE (`rmse_all`), rather than the
+hot-day-conditional RMSE used in the Nigeria heat figure.
+
+```bash
+sbatch --export=ALL,REPOSITORY_ROOT="$PWD",HEAT_VERIFICATION_RESULTS_ROOT="$RESULT_ROOT",REPORT_SCORECARD_REGIONS=global,REPORT_SCORECARD_FORECAST_DAYS="0 3 6 9" slurm/verification/submit_report_scorecard.sbatch
+```
 
 The scorecard is deliberately **raw**, with no forecast bias correction.  Its
 temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day.  Its POD

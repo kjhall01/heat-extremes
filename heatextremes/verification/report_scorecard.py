@@ -345,6 +345,15 @@ _PLOT_METRICS = (
     ("brier_score_probabilistic", "Probabilistic\nBrier", False),
 )
 
+_GLOBAL_PLOT_METRICS = (
+    # The global rung requested for the report is standard all-day T2M RMSE,
+    # not error conditional on a local hot day as in the regional heat panel.
+    ("rmse_all", "Global T2M\nRMSE (K)", False),
+    ("pod_deterministic", "Deterministic\nPOD", True),
+    ("far_deterministic", "Deterministic\nFAR", False),
+    ("brier_score_probabilistic", "Probabilistic\nBrier", False),
+)
+
 
 def hot_day_frequency_change(
     daily_temperature: xr.DataArray,
@@ -428,7 +437,7 @@ def plot_scorecard(
     regions: Mapping[str, Region],
     reference_model: str = "ifs_ens",
 ) -> None:
-    """Write the map-plus-scorecard composition used for the report figure.
+    """Write the regional map-plus-scorecard or global table-only figure.
 
     Cell colour encodes relative performance versus ECMWF IFS ENS; absolute
     values are printed in every cell. Red is worse, white is equal, and blue
@@ -445,6 +454,12 @@ def plot_scorecard(
             "Include it in --models or pass an explicit reference_model."
         )
     frequency_change_maps = frequency_change_maps or {}
+    # The global product deliberately has no map: a world-scale incidence map
+    # is expensive and adds no useful context to a global metric scorecard.
+    # Reclaim that space for the metric cells rather than leaving a placeholder.
+    show_map_column = any(region_name in frequency_change_maps for region_name in region_names)
+    metric_start_column = 1 if show_map_column else 0
+    plot_metrics = _GLOBAL_PLOT_METRICS if region_names == ["global"] else _PLOT_METRICS
     # Each shade represents the percent departure from the reference model,
     # after orienting every metric so positive is better.  Keep the notebook's
     # generous +/-100% scale: a compact +/-50% scale made ordinary differences
@@ -456,124 +471,125 @@ def plot_scorecard(
     map_cmap = plt.colormaps["RdBu_r"].copy()
     map_cmap.set_bad("#e5e7eb")
     figure = plt.figure(
-        figsize=(8.5 + 3.35 * len(_PLOT_METRICS), 1.8 + 3.15 * len(region_names)),
+        figsize=(
+            (8.5 if show_map_column else 4.9) + 3.35 * len(plot_metrics),
+            1.35 + 3.15 * len(region_names),
+        ),
         facecolor="white",
     )
     grid = figure.add_gridspec(
         len(region_names),
-        len(_PLOT_METRICS) + 2,
-        width_ratios=[1.50, *([1.52] * len(_PLOT_METRICS)), 0.12],
+        len(plot_metrics) + 1 + int(show_map_column),
+        width_ratios=[
+            *([1.50] if show_map_column else []),
+            *([1.52] * len(plot_metrics)),
+            0.12,
+        ],
         wspace=0.45,
         hspace=0.45,
     )
     for row, region_name in enumerate(region_names):
-        region = regions[region_name]
-        map_axis = (
-            figure.add_subplot(grid[row, 0], projection=ccrs.PlateCarree())
-            if ccrs is not None
-            else figure.add_subplot(grid[row, 0])
-        )
-        frequency_map = frequency_change_maps.get(region_name)
-        if frequency_map is None:
-            message = (
-                "Global\nmetrics only"
-                if region.latitude_min is None and region.longitude_min is None
-                else "Map\ndisabled"
+        if show_map_column:
+            region = regions[region_name]
+            map_axis = (
+                figure.add_subplot(grid[row, 0], projection=ccrs.PlateCarree())
+                if ccrs is not None
+                else figure.add_subplot(grid[row, 0])
             )
-            map_axis.text(
-                0.5,
-                0.5,
-                message,
-                transform=map_axis.transAxes,
-                ha="center",
-                va="center",
-                fontsize=12,
-            )
-            if ccrs is not None:
-                map_axis.set_global()
-                map_axis.coastlines(color="#4a4a4a", linewidth=0.65)
-        else:
-            map_kwargs = {"transform": ccrs.PlateCarree()} if ccrs is not None else {}
-            image = map_axis.pcolormesh(
-                frequency_map.longitude,
-                frequency_map.latitude,
-                frequency_map,
-                cmap=map_cmap,
-                norm=map_norm,
-                shading="auto",
-                rasterized=True,
-                **map_kwargs,
-            )
-            if ccrs is not None:
-                # Coastlines give geographic orientation; country boundaries
-                # make clear that Nigeria is a reporting box, rather than a
-                # political-boundary average.
-                map_axis.coastlines(color="#4a4a4a", linewidth=0.65)
-                if cfeature is not None:
-                    map_axis.add_feature(
-                        cfeature.BORDERS.with_scale("50m"),
-                        edgecolor="#4a4a4a",
-                        linewidth=0.55,
-                        zorder=3,
-                    )
-                map_axis.spines["geo"].set_visible(True)
-                map_axis.spines["geo"].set_color("#1f2937")
-                map_axis.spines["geo"].set_linewidth(0.8)
-            if region.latitude_min is not None and region.longitude_min is not None:
-                if ccrs is not None:
-                    map_axis.set_extent(
-                        [
-                            region.longitude_min,
-                            region.longitude_max,
-                            region.latitude_min,
-                            region.latitude_max,
-                        ],
-                        crs=ccrs.PlateCarree(),
-                    )
-                else:
-                    map_axis.set(
-                        xlim=(region.longitude_min, region.longitude_max),
-                        ylim=(region.latitude_min, region.latitude_max),
-                    )
-            map_axis.set_facecolor("#f5f7fa")
-            map_axis.set_title(
-                f"{region_name.replace('_', ' ').title()}\nobserved hot-day change",
-                fontsize=12,
-                fontweight="semibold",
-                pad=16,
-            )
-            if ccrs is None:
-                map_axis.set(xlabel="Longitude", ylabel="Latitude")
-            elif region.latitude_min is not None and region.longitude_min is not None:
-                gridlines = map_axis.gridlines(
-                    draw_labels=True,
-                    linewidth=0.35,
-                    color="#6b7280",
-                    alpha=0.5,
-                    linestyle=":",
-                    x_inline=False,
-                    y_inline=False,
+            frequency_map = frequency_change_maps.get(region_name)
+            if frequency_map is None:
+                map_axis.text(
+                    0.5,
+                    0.5,
+                    "Map\ndisabled",
+                    transform=map_axis.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=12,
                 )
-                gridlines.top_labels = False
-                gridlines.right_labels = False
-                gridlines.xlabel_style = {"size": 8, "color": "#374151"}
-                gridlines.ylabel_style = {"size": 8, "color": "#374151"}
-            map_colorbar = figure.colorbar(
-                image,
-                ax=map_axis,
-                orientation="horizontal",
-                pad=0.12,
-                ticks=[-80, -40, 0, 200, 400],
-            )
-            map_colorbar.outline.set_visible(False)
-            map_colorbar.set_label("Extreme-incidence rate change (%)", fontsize=8.5, color="#374151")
-            map_colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
+            else:
+                map_kwargs = {"transform": ccrs.PlateCarree()} if ccrs is not None else {}
+                image = map_axis.pcolormesh(
+                    frequency_map.longitude,
+                    frequency_map.latitude,
+                    frequency_map,
+                    cmap=map_cmap,
+                    norm=map_norm,
+                    shading="auto",
+                    rasterized=True,
+                    **map_kwargs,
+                )
+                if ccrs is not None:
+                    # Coastlines give geographic orientation; country boundaries
+                    # make clear that Nigeria is a reporting box, rather than a
+                    # political-boundary average.
+                    map_axis.coastlines(color="#4a4a4a", linewidth=0.65)
+                    if cfeature is not None:
+                        map_axis.add_feature(
+                            cfeature.BORDERS.with_scale("50m"),
+                            edgecolor="#4a4a4a",
+                            linewidth=0.55,
+                            zorder=3,
+                        )
+                    map_axis.spines["geo"].set_visible(True)
+                    map_axis.spines["geo"].set_color("#1f2937")
+                    map_axis.spines["geo"].set_linewidth(0.8)
+                if region.latitude_min is not None and region.longitude_min is not None:
+                    if ccrs is not None:
+                        map_axis.set_extent(
+                            [
+                                region.longitude_min,
+                                region.longitude_max,
+                                region.latitude_min,
+                                region.latitude_max,
+                            ],
+                            crs=ccrs.PlateCarree(),
+                        )
+                    else:
+                        map_axis.set(
+                            xlim=(region.longitude_min, region.longitude_max),
+                            ylim=(region.latitude_min, region.latitude_max),
+                        )
+                map_axis.set_facecolor("#f5f7fa")
+                map_axis.set_title(
+                    f"{region_name.replace('_', ' ').title()}\nobserved hot-day change",
+                    fontsize=12,
+                    fontweight="semibold",
+                    pad=16,
+                )
+                if ccrs is None:
+                    map_axis.set(xlabel="Longitude", ylabel="Latitude")
+                elif region.latitude_min is not None and region.longitude_min is not None:
+                    gridlines = map_axis.gridlines(
+                        draw_labels=True,
+                        linewidth=0.35,
+                        color="#6b7280",
+                        alpha=0.5,
+                        linestyle=":",
+                        x_inline=False,
+                        y_inline=False,
+                    )
+                    gridlines.top_labels = False
+                    gridlines.right_labels = False
+                    gridlines.xlabel_style = {"size": 8, "color": "#374151"}
+                    gridlines.ylabel_style = {"size": 8, "color": "#374151"}
+                map_colorbar = figure.colorbar(
+                    image,
+                    ax=map_axis,
+                    orientation="horizontal",
+                    pad=0.12,
+                    ticks=[-80, -40, 0, 200, 400],
+                )
+                map_colorbar.outline.set_visible(False)
+                map_colorbar.set_label("Extreme-incidence rate change (%)", fontsize=8.5, color="#374151")
+                map_colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
         regional = scorecard[scorecard["region"].eq(region_name)]
         models = list(regional["model"].drop_duplicates())
         model_labels = (
             regional.drop_duplicates("model").set_index("model").loc[models, "model_label"].tolist()
         )
-        for column, (metric, label, higher_is_better) in enumerate(_PLOT_METRICS, start=1):
+        for metric_index, (metric, label, higher_is_better) in enumerate(plot_metrics):
+            column = metric_start_column + metric_index
             axis = figure.add_subplot(grid[row, column])
             values = regional.pivot(index="model", columns="forecast_day", values=metric).reindex(index=models)
             relative = _relative_performance(values, reference_model, higher_is_better)
@@ -611,7 +627,7 @@ def plot_scorecard(
             )
             if row == 0:
                 axis.set_title(label, fontsize=12, fontweight="semibold", pad=16)
-            if column == 1:
+            if metric_index == 0:
                 axis.set_yticks(
                     range(len(models)),
                     labels=model_labels,
@@ -648,14 +664,15 @@ def plot_scorecard(
         color="#374151",
     )
     colorbar.ax.tick_params(labelsize=8, length=0, colors="#374151")
-    figure.suptitle(
-        "Raw T2M heat forecast scorecard — ERA5 1991–2020 q95 threshold; no bias correction",
-        fontsize=16,
-        fontweight="semibold",
-        y=0.98,
-    )
     path.parent.mkdir(parents=True, exist_ok=True)
-    figure.subplots_adjust(top=0.82, bottom=0.13, left=0.055, right=0.96)
+    figure.subplots_adjust(
+        # Metric headings are two lines; leave room for both without adding a
+        # figure-level title above the panels.
+        top=0.86,
+        bottom=0.13,
+        left=0.055 if show_map_column else 0.13,
+        right=0.96,
+    )
     figure.savefig(path, dpi=220, facecolor="white")
     plt.close(figure)
 
@@ -752,7 +769,11 @@ def build_report_scorecard(
             ),
             "map_definition": (
                 "Map panels show 100 * (2022-2025 JJAS observed local-calendar-day q95 hot-day frequency / "
-                "1991-2020 JJAS frequency - 1), using ERA5 only. The global row is metrics-only."
+                "1991-2020 JJAS frequency - 1), using ERA5 only. The global scorecard is map-free."
+            ),
+            "global_plot_metric_note": (
+                "A global-only figure shows all-day global T2M RMSE (rmse_all), whereas regional heat "
+                "figures show observed-hot-day-conditional T2M RMSE (rmse_hot)."
             ),
             "map_files": [
                 f"observed_hot_day_frequency_change_{region_name}.nc"
