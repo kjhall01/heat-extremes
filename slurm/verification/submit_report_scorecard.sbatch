@@ -21,10 +21,11 @@ if [[ ! -x "${PYTHON}" || ! -f "${REPOSITORY_ROOT}/scripts/verification/build_re
 fi
 
 MODELS_TEXT="${REPORT_SCORECARD_MODELS:-aifs_ens_v2 aifs_v2 aurora_e2s graphcast_e2s ifs_ens}"
-# Nigeria is the publishable default and is rendered as a table-only scorecard.
-# Supply REPORT_SCORECARD_REGIONS explicitly to include Mali or global metrics.
-REGIONS_TEXT="${REPORT_SCORECARD_REGIONS:-nigeria}"
-FORECAST_DAYS_TEXT="${REPORT_SCORECARD_FORECAST_DAYS:-0 3 6 9 12}"
+# The report default is one aligned Nigeria-plus-global, table-only scorecard.
+# Supply REPORT_SCORECARD_REGIONS explicitly for a different region selection.
+REGIONS_TEXT="${REPORT_SCORECARD_REGIONS:-nigeria global}"
+# IFS currently has complete scorecard cases through day 9, not day 12.
+FORECAST_DAYS_TEXT="${REPORT_SCORECARD_FORECAST_DAYS:-0 3 6 9}"
 YEARS_TEXT="${REPORT_SCORECARD_YEARS:-2022 2023 2024 2025}"
 MONTHS_TEXT="${REPORT_SCORECARD_MONTHS:-6 7 8 9}"
 

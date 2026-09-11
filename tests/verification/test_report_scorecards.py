@@ -39,7 +39,7 @@ def test_report_scorecard_uses_requested_model_labels_and_order() -> None:
     ]
 
 
-def test_report_scorecard_keeps_deterministic_and_probabilistic_metrics_distinct() -> None:
+def test_report_scorecard_uses_mean_temperature_binary_event_scores() -> None:
     initialization = np.array(["2022-06-01"], dtype="datetime64[ns]")
     forecast_day = [0]
     latitude = [0.0]
@@ -95,7 +95,10 @@ def test_report_scorecard_keeps_deterministic_and_probabilistic_metrics_distinct
     assert result["rmse_hot"].item() == pytest.approx(1.0)
     assert result["pod_deterministic"].item() == pytest.approx(1.0)
     assert result["far_deterministic"].item() == pytest.approx(0.5)
-    assert result["brier_score_probabilistic"].item() == pytest.approx((0.2**2 + 0.3**2) / 2)
+    # The report Brier Score deliberately ignores the stored member probability
+    # (0.8 and 0.3 here) and uses the mean-temperature q95 exceedance. Both
+    # grid cells forecast hot, while only the first is observed hot.
+    assert result["brier_score_binary"].item() == pytest.approx(0.5)
 
 
 def test_global_z500_statistics_use_requested_instantaneous_lead_hours() -> None:
@@ -203,7 +206,7 @@ def test_report_plot_writes_table_only_absolute_metric_cells(tmp_path: Path) -> 
                     "rmse_hot": 1.0 + adjustment,
                     "pod_deterministic": 0.5 - adjustment,
                     "far_deterministic": 0.2 + adjustment,
-                    "brier_score_probabilistic": 0.1 + adjustment,
+                    "brier_score_binary": 0.1 + adjustment,
                 }
             )
     path = tmp_path / "scorecard.png"
@@ -234,24 +237,27 @@ def test_scorecard_colours_orient_all_metrics_as_performance_against_ifs() -> No
     assert higher_is_better.loc["graphcast_e2s"].tolist() == pytest.approx([0.5, 0.5])
 
 
-def test_global_report_plot_uses_full_width_table(tmp_path: Path) -> None:
+def test_report_plot_aligns_nigeria_and_global_rows_with_one_layout(tmp_path: Path) -> None:
     rows = []
-    for model, label, adjustment in (("ifs_ens", "ECMWF IFS ENS", 0.0), ("graphcast_e2s", "GraphCast", 0.1)):
-        rows.append(
-            {
-                "region": "global",
-                "model": model,
-                "model_label": label,
-                "forecast_day": 0,
-                "rmse_all": 1.0 + adjustment,
-                "rmse_hot": 1.0 + adjustment,
-                "pod_deterministic": 0.5 - adjustment,
-                "far_deterministic": 0.2 + adjustment,
-                "brier_score_probabilistic": 0.1 + adjustment,
-            }
-        )
+    for region, region_adjustment in (("nigeria", 0.0), ("global", 0.1)):
+        for model, label, adjustment in (
+            ("ifs_ens", "IFS (ensemble mean)", 0.0),
+            ("graphcast_e2s", "GraphCast", 0.1),
+        ):
+            rows.append(
+                {
+                    "region": region,
+                    "model": model,
+                    "model_label": label,
+                    "forecast_day": 0,
+                    "rmse_hot": 1.0 + adjustment + region_adjustment,
+                    "pod_deterministic": 0.5 - adjustment - region_adjustment,
+                    "far_deterministic": 0.2 + adjustment + region_adjustment,
+                    "brier_score_binary": 0.1 + adjustment + region_adjustment,
+                }
+            )
 
-    path = tmp_path / "global_scorecard.png"
+    path = tmp_path / "combined_scorecard.png"
     plot_scorecard(
         pd.DataFrame(rows),
         path,

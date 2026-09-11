@@ -139,7 +139,7 @@ bash slurm/verification/submit_model_temperature_q95_workflow.sh \
 This workflow writes only a global q95 field plus temporary per-band daily
 staging stores beneath `model_climatology/`; it does not touch raw IFS data.
 
-## Report scorecard (Nigeria default; global available separately)
+## Report scorecard (aligned Nigeria and global)
 
 The static notebook [`model_scorecards.ipynb`](../model_scorecards.ipynb) is
 useful for figure development.  For the report, submit the reproducible batch
@@ -152,7 +152,7 @@ bash slurm/verification/submit_all_reforecasts_workflow.sh \
   --models "aifs_ens_v2 aifs_v2 aurora_e2s graphcast_e2s ifs_ens" \
   --years "2022 2023 2024 2025" --months "6 7 8 9" \
   --max-forecast-day 12 --max-concurrent 1 \
-  --regions "nigeria" \
+  --regions "nigeria global" \
   --report-scorecard
 ```
 
@@ -165,43 +165,30 @@ The final job writes these files beneath
 - `heat_report_scorecard_metadata.json`, including the scientific definitions
   and source paths.
 
-The Nigeria PNG is a table-only scorecard: absolute metric values are printed
-in colour-coded cells, with IFS ensemble mean as the reference. The colour
+The PNG contains aligned Nigeria and global rows with the same four metrics:
+hot-day RMSE, Probability of Detection, False Alarm Ratio, and Brier Score.
+It has one shared colour bar and no map panel. Absolute metric values are
+printed in every cell, with IFS ensemble mean as the reference. The colour
 legend is a signed relative score (not a percentage): for RMSE, FAR, and
 Brier it is `IFS / model - 1`; for POD it is `model / IFS - 1`. Red means
 worse, white equal, and blue better.
 
-### Global T2M report figure
-
-Use the same scorecard job with `global` explicitly selected. It writes a
-full-width global metric figure to `<result-root>/_report_scorecard_global/`,
-leaving the Nigeria output intact. The global figure shares the IFS baseline,
-cell styling, and legend. Its
-first column is all-day global T2M RMSE (`rmse_all`), rather than the
-hot-day-conditional RMSE used in the Nigeria heat figure.
-
-```bash
-sbatch --export=ALL,REPOSITORY_ROOT="$PWD",HEAT_VERIFICATION_RESULTS_ROOT="$RESULT_ROOT",REPORT_SCORECARD_REGIONS=global,REPORT_SCORECARD_FORECAST_DAYS="0 3 6 9" slurm/verification/submit_report_scorecard.sbatch
-```
-
-To submit both report figures together, use the cluster helper. It submits
-separate Nigeria and global jobs and prints their IDs, output locations, and
-the corresponding log paths.
+To submit the final combined figure, use the cluster helper. It submits one
+job and prints its ID, output location, and log paths.
 
 ```bash
 bash slurm/verification/submit_both_jobs.sh
 ```
 
 The scorecard is deliberately **raw**, with no forecast bias correction. Its
-temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day. Its POD
-and FAR are *deterministic*: the model's deterministic/ensemble-mean T2M is
-tested against ERA5's 1991--2020 local calendar-day q95. Brier is evaluated
-without a decision cutoff. For AIFSv2 ensemble mean and IFS ensemble mean its
-probability is the fraction of members exceeding q95; for AIFSv2
-deterministic, Aurora, and GraphCast it is a 0/1 q95-exceedance forecast, so
-their Brier score is weighted binary event error rather than an ensemble
-probability-calibration score. `mali` and `nigeria` are explicitly labelled
-rectangular reporting boxes, not country-boundary masks.
+temperature RMSE is in K; `rmse_hot` conditions on an ERA5 hot day. Its
+Probability of Detection and False Alarm Ratio are *deterministic*: the model's
+ensemble-mean/deterministic T2M is tested against ERA5's 1991--2020 local
+calendar-day q95. The Brier Score uses that same binary q95-exceedance
+forecast for every model, including the two ensemble systems. It is therefore
+a weighted binary event-error score, not an ensemble-member-probability or
+calibration score. `mali` and `nigeria` are explicitly labelled rectangular
+reporting boxes, not country-boundary masks.
 
 ### Global Z500 + T2M scorecard
 

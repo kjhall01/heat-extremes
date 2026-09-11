@@ -2,10 +2,10 @@
 
 This module is deliberately separate from the normal aggregate figures.  It
 reproduces the deterministic temperature-versus-ERA5-q95 definitions used in
-``model_scorecards.ipynb`` while also reporting a hot-day Brier score.  The
-distinction matters: POD/FAR here are for a deterministic forecast made from
-each model's mean temperature.  Brier uses member-fraction probabilities for
-ensembles and 0/1 exceedance forecasts for deterministic models.
+``model_scorecards.ipynb`` while also reporting a hot-day Brier score.  All
+event scores use the same deterministic q95 exceedance of each model's
+ensemble-mean/deterministic temperature; no member-fraction probability is
+used in this report product.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 from dask.diagnostics import ProgressBar
+from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import TwoSlopeNorm
 
@@ -122,15 +123,12 @@ def score_lead(
 
     ``pod_deterministic`` and ``far_deterministic`` classify the model's
     ensemble-mean/deterministic temperature against the ERA5 1991--2020 q95
-    threshold. ``brier_score_probabilistic`` is a proper Brier score with no
-    decision cutoff.  Its probability is the member exceedance fraction for
-    ensemble sources, or a valid 0/1 q95-exceedance forecast for deterministic
-    sources.
+    threshold. ``brier_score_binary`` is the Brier score of that same 0/1
+    q95-exceedance forecast, with no separate probability decision cutoff.
     """
     lead = dataset.sel(forecast_day=forecast_day)
     forecast = lead["forecast_temperature"]
     observation = lead["observation_temperature"]
-    probability = lead["forecast_probability"].sel(event="hot_day_q95")
     observed_hot = lead["observed_event"].sel(event="hot_day_q95") > 0.5
     temperature_valid = lead["temperature_case_valid"].fillna(False).astype(bool)
     event_valid = lead["event_case_valid"].sel(event="hot_day_q95").fillna(False).astype(bool)
@@ -140,7 +138,6 @@ def score_lead(
 
     temperature_valid = temperature_valid & region_valid & observation.notnull()
     deterministic_valid = temperature_valid & event_valid & q95.notnull()
-    probability_valid = event_valid & region_valid & probability.notnull()
     hot_temperature_valid = temperature_valid & event_valid & observed_hot
 
     error = forecast - observation
@@ -150,11 +147,12 @@ def score_lead(
     rmse_hot_mean_square, hot_weighted_support, hot_cases = _weighted_mean(
         error**2, hot_temperature_valid, weights
     )
-    brier_score, probability_weighted_support, probability_cases = _weighted_mean(
-        (probability - observed_hot.astype(float)) ** 2, probability_valid, weights
-    )
-
     forecast_hot = forecast > q95
+    binary_brier_score, brier_weighted_support, brier_cases = _weighted_mean(
+        (forecast_hot.astype(float) - observed_hot.astype(float)) ** 2,
+        deterministic_valid,
+        weights,
+    )
     hit = deterministic_valid & forecast_hot & observed_hot
     miss = deterministic_valid & ~forecast_hot & observed_hot
     false_alarm = deterministic_valid & forecast_hot & ~observed_hot
@@ -169,15 +167,15 @@ def score_lead(
             "rmse_hot": np.sqrt(rmse_hot_mean_square),
             "pod_deterministic": hit_support / (hit_support + miss_support),
             "far_deterministic": false_alarm_support / (hit_support + false_alarm_support),
-            "brier_score_probabilistic": brier_score,
+            "brier_score_binary": binary_brier_score,
             "all_weighted_support": all_weighted_support,
             "hot_weighted_support": hot_weighted_support,
             "binary_weighted_support": binary_support,
-            "probability_weighted_support": probability_weighted_support,
+            "brier_weighted_support": brier_weighted_support,
             "all_cases": all_cases,
             "hot_cases": hot_cases,
             "binary_cases": binary_cases,
-            "probability_cases": probability_cases,
+            "brier_cases": brier_cases,
             "hits": hit_cases,
             "misses": miss_cases,
             "false_alarms": false_alarm_cases,
@@ -302,15 +300,15 @@ def scorecard_direction_table(
 ) -> pd.DataFrame:
     """Make an explicit GraphCast-versus-IFS direction-check table.
 
-    A negative difference is better for errors/FAR/Brier; positive is better
-    for POD.  Values are not declared statistically significant here.
+    A negative difference is better for errors/False Alarm Ratio/Brier Score; positive is
+    better for Probability of Detection. Values are not declared statistically
+    significant here.
     """
     metric_directions = {
-        "rmse_all": "lower",
         "rmse_hot": "lower",
         "pod_deterministic": "higher",
         "far_deterministic": "lower",
-        "brier_score_probabilistic": "lower",
+        "brier_score_binary": "lower",
     }
     wanted = scorecard[scorecard["model"].isin([candidate, comparator])]
     if set(wanted["model"]) != {candidate, comparator}:
@@ -341,19 +339,10 @@ def scorecard_direction_table(
 
 
 _PLOT_METRICS = (
-    ("rmse_hot", "Hot-day RMSE (K)", False),
-    ("pod_deterministic", "POD", True),
-    ("far_deterministic", "FAR", False),
-    ("brier_score_probabilistic", "Brier", False),
-)
-
-_GLOBAL_PLOT_METRICS = (
-    # The global rung requested for the report is standard all-day T2M RMSE,
-    # not error conditional on a local hot day as in the regional heat panel.
-    ("rmse_all", "T2M RMSE (K)", False),
-    ("pod_deterministic", "POD", True),
-    ("far_deterministic", "FAR", False),
-    ("brier_score_probabilistic", "Brier", False),
+    ("rmse_hot", "Hot-Day RMSE (K)", False),
+    ("pod_deterministic", "Probability of Detection", True),
+    ("far_deterministic", "False Alarm Ratio", False),
+    ("brier_score_binary", "Brier Score", False),
 )
 
 
@@ -363,40 +352,10 @@ def _relative_performance(values: pd.DataFrame, reference_model: str, higher_is_
     return relative.replace([np.inf, -np.inf], np.nan) - 1.0
 
 
-def _brier_probability_definition(models: Sequence[str]) -> str:
-    """Describe exactly how the scorecard's canonical probability is formed."""
-    ensemble_models = [
-        DEFAULT_MODEL_LABELS.get(model, model)
-        for model in models
-        if model in {"aifs_ens_v2", "ifs_ens"}
-    ]
-    deterministic_models = [
-        DEFAULT_MODEL_LABELS.get(model, model)
-        for model in models
-        if model in {"aifs_v2", "aurora_e2s", "graphcast_e2s"}
-    ]
-    clauses = [
-        "Brier score is the cosine-latitude-weighted mean of (p - o)^2 for the ERA5 q95 hot-day event, without a decision cutoff."
-    ]
-    if ensemble_models:
-        clauses.append(
-            "For "
-            + ", ".join(ensemble_models)
-            + ", p is the fraction of members whose local-solar daily T2M exceeds the ERA5 1991-2020 local calendar-day q95."
-        )
-    if deterministic_models:
-        clauses.append(
-            "For "
-            + ", ".join(deterministic_models)
-            + ", p is the model's 0/1 q95-exceedance forecast, so Brier is weighted binary event error rather than ensemble-probability calibration."
-        )
-    return " ".join(clauses)
-
-
 def _format_metric(value: float, metric: str) -> str:
     if not np.isfinite(value):
         return "—"
-    return f"{value:.3f}" if metric == "brier_score_probabilistic" else f"{value:.2f}"
+    return f"{value:.3f}" if metric == "brier_score_binary" else f"{value:.2f}"
 
 
 def plot_scorecard(
@@ -421,7 +380,7 @@ def plot_scorecard(
             f"Cannot plot a comparison scorecard without baseline model {reference_model!r}. "
             "Include it in --models or pass an explicit reference_model."
         )
-    plot_metrics = _GLOBAL_PLOT_METRICS if region_names == ["global"] else _PLOT_METRICS
+    plot_metrics = _PLOT_METRICS
     # Each shade represents a signed, unitless comparison to the reference,
     # oriented so positive means better. Keep the generous +/-1 scale: a
     # compact +/-0.5 scale made ordinary differences look saturated and the
@@ -443,6 +402,7 @@ def plot_scorecard(
         wspace=0.45,
         hspace=0.62,
     )
+    region_label_axes: list[tuple[str, Axes]] = []
     for row, region_name in enumerate(region_names):
         regional = scorecard[scorecard["region"].eq(region_name)]
         available_models = list(regional["model"].drop_duplicates())
@@ -453,6 +413,8 @@ def plot_scorecard(
         )
         for metric_index, (metric, label, higher_is_better) in enumerate(plot_metrics):
             axis = figure.add_subplot(grid[row, metric_index])
+            if metric_index == 0:
+                region_label_axes.append((region_name, axis))
             values = regional.pivot(index="model", columns="forecast_day", values=metric).reindex(index=models)
             relative = _relative_performance(values, reference_model, higher_is_better)
             axis.imshow(
@@ -531,9 +493,22 @@ def plot_scorecard(
     figure.subplots_adjust(
         top=0.88,
         bottom=0.11,
-        left=0.15,
+        left=0.20,
         right=0.96,
     )
+    for region_name, axis in region_label_axes:
+        bounds = axis.get_position()
+        figure.text(
+            0.055,
+            (bounds.y0 + bounds.y1) / 2,
+            region_name.replace("_", " ").title(),
+            rotation=90,
+            ha="center",
+            va="center",
+            fontsize=11,
+            fontweight="semibold",
+            color="#374151",
+        )
     figure.savefig(path, dpi=220, facecolor="white")
     plt.close(figure)
 
@@ -603,14 +578,16 @@ def build_report_scorecard(
             "bias_correction": "none",
             "deterministic_definition": (
                 "Raw forecast ensemble-mean/deterministic temperature > ERA5 1991-2020 local "
-                "calendar-day q95; POD and FAR use this binary forecast."
+                "calendar-day q95. Probability of Detection is hits / (hits + misses); False Alarm "
+                "Ratio is false alarms / (hits + false alarms)."
             ),
-            "probabilistic_definition": _brier_probability_definition(models),
-            "figure_layout": "Table-only scorecard; no map panel.",
-            "global_plot_metric_note": (
-                "A global-only figure shows all-day global T2M RMSE (rmse_all), whereas regional heat "
-                "figures show observed-hot-day-conditional T2M RMSE (rmse_hot)."
+            "brier_definition": (
+                "Brier Score is the cosine-latitude-weighted mean of (p - o)^2 for the ERA5 q95 "
+                "hot-day event, with p=1 when raw forecast ensemble-mean/deterministic local-solar "
+                "daily T2M exceeds the ERA5 1991-2020 local calendar-day q95 and p=0 otherwise. "
+                "It is a binary Brier score (weighted event error), not a member-fraction probability score."
             ),
+            "figure_layout": "One aligned table-only scorecard for the selected regions; no map panel.",
             "plot_reference_model": "ifs_ens",
             "plot_relative_performance_definition": (
                 "Heatmap colour is signed relative performance versus ECMWF IFS ENS: "

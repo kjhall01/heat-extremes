@@ -3,9 +3,10 @@
 
 The script does not open raw model forecast stores except for the historical
 AIFS ENS v2 compact monthly product, which has not yet been migrated to the
-canonical cache.  It writes raw (not bias-corrected) deterministic q95
-POD/FAR and Brier diagnostics side by side. Brier uses ensemble-member
-fractions where available and 0/1 deterministic q95 forecasts otherwise.
+canonical cache. It writes raw (not bias-corrected) deterministic q95
+Probability of Detection, False Alarm Ratio, and binary Brier Score diagnostics
+side by side. Brier uses the q95 exceedance of ensemble-mean/deterministic T2M
+for every model, not an ensemble-member fraction.
 """
 
 from __future__ import annotations
@@ -29,10 +30,11 @@ from heatextremes.verification.regions import load_regions, select_regions
 
 
 DEFAULT_MODELS = ["aifs_ens_v2", "aifs_v2", "aurora_e2s", "graphcast_e2s", "ifs_ens"]
-# The report-facing default is the publishable Nigeria panel.  Other regional
-# or global scorecards remain available through --regions when they are needed.
-DEFAULT_REGIONS = ["nigeria"]
-DEFAULT_FORECAST_DAYS = [0, 3, 6, 9, 12]
+# The final report figure aligns the publishable Nigeria and global panels.
+DEFAULT_REGIONS = ["nigeria", "global"]
+# IFS has complete canonical report cases through day 9; do not silently
+# request its currently incomplete day-12 cache slice.
+DEFAULT_FORECAST_DAYS = [0, 3, 6, 9]
 DEFAULT_YEARS = [2022, 2023, 2024, 2025]
 DEFAULT_MONTHS = [6, 7, 8, 9]
 

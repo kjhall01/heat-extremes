@@ -29,9 +29,9 @@ Options:
   --report-scorecard-models "NAME ..."
                               default: AIFS ENS v2, IFS ENS, AIFS v2, Aurora, GraphCast
   --report-scorecard-regions "NAME ..."
-                              default: "nigeria"
+                              default: "nigeria global"
   --report-scorecard-forecast-days "N ..."
-                              default: "0 3 6 9 12"
+                              default: "0 3 6 9"
   --overwrite                   replace only configured partial result partitions
   --inventory-only              write/report inventory but do not submit jobs
 EOF
@@ -54,8 +54,8 @@ REPORT_SCORECARD=0
 REPORT_SCORECARD_OUTPUT=""
 REPORT_SCORECARD_MODELS_TEXT="aifs_ens_v2 aifs_v2 aurora_e2s graphcast_e2s ifs_ens"
 REPORT_SCORECARD_MODELS_EXPLICIT=0
-REPORT_SCORECARD_REGIONS_TEXT="nigeria"
-REPORT_SCORECARD_FORECAST_DAYS_TEXT="0 3 6 9 12"
+REPORT_SCORECARD_REGIONS_TEXT="nigeria global"
+REPORT_SCORECARD_FORECAST_DAYS_TEXT="0 3 6 9"
 OVERWRITE_VALUE=0
 INVENTORY_ONLY=0
 while (( $# )); do
